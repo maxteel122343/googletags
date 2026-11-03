@@ -69,6 +69,9 @@ object CreatorDetectionBus {
     }
 
     fun setInterfaceVersion(version: com.example.data.model.InterfaceVersion) {
+        if (_activeInterfaceVersion.value == version && FloatingOverlayManager.isShowing()) {
+            return
+        }
         _activeInterfaceVersion.value = version
         if (FloatingOverlayManager.isShowing()) {
             FloatingOverlayManager.switchInterfaceVersion(version)

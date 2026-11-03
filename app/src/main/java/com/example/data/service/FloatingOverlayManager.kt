@@ -3,6 +3,7 @@ package com.example.data.service
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
+import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.drawable.GradientDrawable
@@ -11,6 +12,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
+import android.util.Log
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.KeyEvent
@@ -20,6 +22,7 @@ import android.view.ViewGroup
 import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
+import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
@@ -40,6 +43,7 @@ import java.nio.charset.StandardCharsets
  *
  * Supports:
  * - 5 layout paradigms: V1 (Bottom Bar), V2 (Sidebar), V3 (Popup Card), V4 (50% Split), V5 (Bottom Sheet)
+ * - Clean lifecycle recreation when switching versions without black screens or frozen renderers
  * - Sidebar drag-to-edge hide, edge resize handle, and edge tab restore
  * - Real EditText search bar with dynamic WindowManager focus & soft keyboard management
  * - Dynamic '+' tag adder with inline tag creation
@@ -47,14 +51,18 @@ import java.nio.charset.StandardCharsets
  */
 object FloatingOverlayManager {
 
+    private const val TAG = "FeedLensOverlay"
+
     private var windowManager: WindowManager? = null
     private var overlayRootView: View? = null
     private var currentWmParams: WindowManager.LayoutParams? = null
+    private var lastContext: Context? = null
 
     private var mainContainer: LinearLayout? = null
     private var webView: WebView? = null
     private var searchEditText: EditText? = null
     private var progressBar: ProgressBar? = null
+    private var loadingContainer: View? = null
     private var chipsRowLayout: LinearLayout? = null
     private var addTagInlineContainer: LinearLayout? = null
     private var newTagEditText: EditText? = null
@@ -89,6 +97,8 @@ object FloatingOverlayManager {
         initialQuery: String,
         version: InterfaceVersion = CreatorDetectionBus.activeInterfaceVersion.value
     ) {
+        lastContext = context.applicationContext
+
         if (overlayRootView != null) {
             switchInterfaceVersion(version)
             updateQuery(initialQuery)
@@ -96,6 +106,7 @@ object FloatingOverlayManager {
         }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(context)) {
+            Log.w(TAG, "showOverlay: SYSTEM_ALERT_WINDOW not granted, requesting permission")
             CreatorDetectionBus.requestOverlayPermission(context)
             return
         }
@@ -104,6 +115,7 @@ object FloatingOverlayManager {
         windowManager = appContext.getSystemService(Context.WINDOW_SERVICE) as WindowManager
         currentQuery = initialQuery
         currentVersion = version
+        lastLoadedUrl = ""
 
         val layoutType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
@@ -117,29 +129,147 @@ object FloatingOverlayManager {
             WindowManager.LayoutParams.WRAP_CONTENT,
             layoutType,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+                    WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
             PixelFormat.TRANSLUCENT
         ).apply {
             softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
         }
         currentWmParams = wmParams
 
-        // Configure layout geometry based on active InterfaceVersion
         applyVersionGeometry(appContext, wmParams, version)
 
-        // Root container holds both the main overlay window and the docked edge tab
         val root = FrameLayout(appContext)
         overlayRootView = root
 
         buildOverlayViewHierarchy(appContext, root, wmParams)
 
         try {
+            Log.d(TAG, "showOverlay: adding view to WindowManager for version $version")
             windowManager?.addView(root, wmParams)
             CreatorDetectionBus.setOverlayShowing(true)
-            loadSearchQuery(currentQuery)
-        } catch (_: Exception) {
+            loadSearchQuery(currentQuery, force = true)
+        } catch (e: Exception) {
+            Log.e(TAG, "showOverlay failed to add view", e)
             hideOverlay()
         }
+    }
+
+    /**
+     * Completely destroys the current overlay view hierarchy and WebView,
+     * removes from WindowManager, and recreates cleanly for the new InterfaceVersion.
+     * Guarantees no black screen or zombie renderer state.
+     */
+    fun switchInterfaceVersion(newVersion: InterfaceVersion) {
+        runOnMainThread {
+            try {
+                Log.d(TAG, "switchInterfaceVersion: transitioning from $currentVersion to $newVersion")
+                val context = overlayRootView?.context ?: lastContext
+                if (context == null) {
+                    Log.e(TAG, "switchInterfaceVersion: context is null")
+                    return@runOnMainThread
+                }
+
+                val queryToRetain = currentQuery
+
+                // 1. Destroy old views, WebView, and WindowManager layout completely
+                destroyCurrentOverlayViews()
+
+                // 2. Reset state for clean rebuild
+                lastLoadedUrl = ""
+                currentVersion = newVersion
+                isSidebarDocked = false
+
+                // 3. Re-create WindowManager layout params with new version geometry
+                val wm = windowManager ?: (context.getSystemService(Context.WINDOW_SERVICE) as WindowManager).also {
+                    windowManager = it
+                }
+
+                val layoutType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+                } else {
+                    @Suppress("DEPRECATION")
+                    WindowManager.LayoutParams.TYPE_PHONE
+                }
+
+                val wmParams = WindowManager.LayoutParams(
+                    WindowManager.LayoutParams.WRAP_CONTENT,
+                    WindowManager.LayoutParams.WRAP_CONTENT,
+                    layoutType,
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                            WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+                            WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
+                    PixelFormat.TRANSLUCENT
+                ).apply {
+                    softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
+                }
+                currentWmParams = wmParams
+
+                applyVersionGeometry(context, wmParams, newVersion)
+
+                // 4. Build fresh view hierarchy
+                val newRoot = FrameLayout(context)
+                overlayRootView = newRoot
+
+                buildOverlayViewHierarchy(context, newRoot, wmParams)
+
+                // 5. Add cleanly to WindowManager
+                wm.addView(newRoot, wmParams)
+                CreatorDetectionBus.setOverlayShowing(true)
+                Log.d(TAG, "switchInterfaceVersion: successfully added new overlay for $newVersion")
+
+                // 6. Force reload the search query into the newly created WebView
+                loadSearchQuery(queryToRetain, force = true)
+            } catch (e: Exception) {
+                Log.e(TAG, "switchInterfaceVersion failed", e)
+            }
+        }
+    }
+
+    private fun destroyCurrentOverlayViews() {
+        Log.d(TAG, "destroyCurrentOverlayViews: releasing existing views and WebView")
+
+        // Destroy WebView cleanly
+        webView?.let { wv ->
+            try {
+                wv.stopLoading()
+                wv.loadUrl("about:blank")
+                wv.clearHistory()
+                wv.clearCache(true)
+                wv.onPause()
+                (wv.parent as? ViewGroup)?.removeView(wv)
+                wv.destroy()
+                Log.d(TAG, "WebView destroyed")
+            } catch (e: Exception) {
+                Log.e(TAG, "Error destroying WebView", e)
+            }
+        }
+        webView = null
+
+        // Remove from WindowManager
+        overlayRootView?.let { root ->
+            try {
+                if (root.isAttachedToWindow) {
+                    windowManager?.removeViewImmediate(root)
+                } else {
+                    windowManager?.removeView(root)
+                }
+                Log.d(TAG, "Root view removed from WindowManager")
+            } catch (e: Exception) {
+                Log.e(TAG, "Error removing root from WindowManager", e)
+            }
+        }
+        overlayRootView = null
+
+        mainContainer = null
+        dockedEdgeTab = null
+        searchEditText = null
+        newTagEditText = null
+        addTagInlineContainer = null
+        chipsRowLayout = null
+        progressBar = null
+        loadingContainer = null
+        currentWmParams = null
     }
 
     private fun applyVersionGeometry(
@@ -152,13 +282,13 @@ object FloatingOverlayManager {
         val screenH = dm.heightPixels
 
         when (version) {
-            // V1: Bottom Horizontal Cards (Reels style bar)
+            // V1: Bottom Horizontal Cards (Reels style bar anchored to bottom)
             InterfaceVersion.BOTTOM_HORIZONTAL_CARDS -> {
                 wmParams.gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
                 wmParams.x = 0
                 wmParams.y = dpToPx(context, 12)
                 wmParams.width = (screenW * 0.94f).toInt()
-                wmParams.height = dpToPx(context, 260)
+                wmParams.height = dpToPx(context, 300)
             }
 
             // V2: Side Vertical Cards (Sidebar docked to right edge)
@@ -197,7 +327,7 @@ object FloatingOverlayManager {
                 wmParams.x = 0
                 wmParams.y = 0
                 wmParams.width = screenW
-                wmParams.height = (screenH * 0.48f).toInt()
+                wmParams.height = (screenH * 0.52f).toInt()
             }
         }
     }
@@ -263,9 +393,10 @@ object FloatingOverlayManager {
 
         root.addView(edgeTab, edgeTabLp)
 
-        // 2. MAIN CONTAINER (The full overlay layout)
+        // 2. MAIN CONTAINER
+        val isHorizontal = currentVersion == InterfaceVersion.SIDE_VERTICAL_CARDS || currentVersion == InterfaceVersion.FULL_SPLIT_SCREEN
         val mainLayout = LinearLayout(context).apply {
-            orientation = if (currentVersion == InterfaceVersion.SIDE_VERTICAL_CARDS) LinearLayout.HORIZONTAL else LinearLayout.VERTICAL
+            orientation = if (isHorizontal) LinearLayout.HORIZONTAL else LinearLayout.VERTICAL
             val bg = GradientDrawable().apply {
                 setColor(Color.parseColor("#FA12141A"))
                 cornerRadius = if (currentVersion == InterfaceVersion.BOTTOM_SHEET || currentVersion == InterfaceVersion.FULL_SPLIT_SCREEN)
@@ -280,8 +411,8 @@ object FloatingOverlayManager {
         }
         mainContainer = mainLayout
 
-        // V2 RESIZE HANDLE (Left vertical strip for sidebar width resize)
-        if (currentVersion == InterfaceVersion.SIDE_VERTICAL_CARDS || currentVersion == InterfaceVersion.FULL_SPLIT_SCREEN) {
+        // RESIZE HANDLE (Left vertical strip for sidebar width resize)
+        if (isHorizontal) {
             val leftResizeHandle = View(context).apply {
                 val handleBg = GradientDrawable().apply {
                     setColor(Color.parseColor("#334285F4"))
@@ -307,11 +438,18 @@ object FloatingOverlayManager {
                 dpToPx(context, 8)
             )
         }
-        val contentLp = LinearLayout.LayoutParams(
-            0,
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            1f
-        )
+        val contentLp = if (isHorizontal) {
+            LinearLayout.LayoutParams(
+                0,
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                1f
+            )
+        } else {
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        }
 
         // TOP BAR: Drag Handle Pill
         val dragHandle = View(context).apply {
@@ -330,7 +468,7 @@ object FloatingOverlayManager {
         }
         contentColumn.addView(dragHandle, dragHandleLp)
 
-        // HEADER: Mode Pills + Browser Icon + Dock/Hide Icon + Close Icon
+        // HEADER: Mode Pills (V1..V5) + Browser Icon + Dock Icon + Close Icon
         val headerRow = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -342,7 +480,7 @@ object FloatingOverlayManager {
             setMargins(0, 0, 0, dpToPx(context, 6))
         }
 
-        // Mode switch pills (V1, V2, V3, V4, V5)
+        // Mode switch pills
         val modeScroll = HorizontalScrollView(context).apply {
             isHorizontalScrollBarEnabled = false
         }
@@ -370,7 +508,7 @@ object FloatingOverlayManager {
                 background = pBg
                 setPadding(dpToPx(context, 6), dpToPx(context, 2), dpToPx(context, 6), dpToPx(context, 2))
                 setOnClickListener {
-                    switchInterfaceVersion(ver)
+                    CreatorDetectionBus.setInterfaceVersion(ver)
                 }
             }
             val pillLp = LinearLayout.LayoutParams(
@@ -425,7 +563,7 @@ object FloatingOverlayManager {
 
         contentColumn.addView(headerRow, headerRowLp)
 
-        // SEARCH BAR (Interactive EditText with keyboard support!)
+        // SEARCH BAR (Interactive EditText with keyboard support)
         val searchBarLayout = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -461,7 +599,6 @@ object FloatingOverlayManager {
             setSingleLine(true)
             imeOptions = EditorInfo.IME_ACTION_SEARCH
 
-            // When user taps EditText, temporarily enable focus so soft keyboard opens
             setOnTouchListener { _, event ->
                 if (event.action == MotionEvent.ACTION_UP) {
                     enableInputFocus(this)
@@ -604,7 +741,8 @@ object FloatingOverlayManager {
 
         // PROGRESS BAR
         val pBar = ProgressBar(context, null, android.R.attr.progressBarStyleHorizontal).apply {
-            isIndeterminate = true
+            isIndeterminate = false
+            max = 100
             visibility = View.GONE
         }
         val pBarLp = LinearLayout.LayoutParams(
@@ -614,14 +752,21 @@ object FloatingOverlayManager {
         progressBar = pBar
         contentColumn.addView(pBar, pBarLp)
 
-        // REAL INTERACTIVE WEBVIEW
-        val wv = WebView(context).apply {
+        // WEB CONTAINER (Contains WebView + Loading state indicator)
+        val webContainer = FrameLayout(context).apply {
             val wvDrawable = GradientDrawable().apply {
-                setColor(Color.parseColor("#121212"))
+                setColor(Color.parseColor("#12141A"))
                 cornerRadius = dpToPx(context, 10).toFloat()
             }
             background = wvDrawable
             clipToOutline = true
+        }
+
+        // REAL INTERACTIVE WEBVIEW
+        val wv = WebView(context).apply {
+            setBackgroundColor(Color.TRANSPARENT)
+            isVerticalScrollBarEnabled = true
+            isHorizontalScrollBarEnabled = false
 
             settings.apply {
                 javaScriptEnabled = true
@@ -632,13 +777,38 @@ object FloatingOverlayManager {
                 userAgentString = "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
             }
 
+            webChromeClient = object : WebChromeClient() {
+                override fun onProgressChanged(view: WebView?, newProgress: Int) {
+                    if (newProgress in 1..99) {
+                        progressBar?.visibility = View.VISIBLE
+                        progressBar?.progress = newProgress
+                        if (newProgress > 65) {
+                            loadingContainer?.visibility = View.GONE
+                        }
+                    } else {
+                        progressBar?.visibility = View.GONE
+                        loadingContainer?.visibility = View.GONE
+                    }
+                }
+            }
+
             webViewClient = object : WebViewClient() {
                 override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                    Log.d(TAG, "WebView onPageStarted: $url")
                     progressBar?.visibility = View.VISIBLE
+                    loadingContainer?.visibility = View.VISIBLE
                 }
 
                 override fun onPageFinished(view: WebView?, url: String?) {
+                    Log.d(TAG, "WebView onPageFinished: $url")
                     progressBar?.visibility = View.GONE
+                    loadingContainer?.visibility = View.GONE
+                }
+
+                override fun onReceivedError(view: WebView?, errorCode: Int, description: String?, failingUrl: String?) {
+                    Log.e(TAG, "WebView error: $errorCode $description on $failingUrl")
+                    progressBar?.visibility = View.GONE
+                    loadingContainer?.visibility = View.GONE
                 }
 
                 override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
@@ -646,13 +816,47 @@ object FloatingOverlayManager {
                 }
             }
         }
-        val wvLp = LinearLayout.LayoutParams(
+        val wvLp = FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT
+        )
+        webContainer.addView(wv, wvLp)
+        webView = wv
+
+        val loadingLayout = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            visibility = View.GONE
+        }
+        loadingContainer = loadingLayout
+
+        val spinner = ProgressBar(context).apply {
+            indeterminateTintList = ColorStateList.valueOf(Color.parseColor("#4285F4"))
+        }
+        val spLp = LinearLayout.LayoutParams(dpToPx(context, 30), dpToPx(context, 30))
+        loadingLayout.addView(spinner, spLp)
+
+        val loadingText = TextView(context).apply {
+            text = "Buscando no Google..."
+            setTextColor(Color.parseColor("#8AB4F8"))
+            textSize = 12f
+            setPadding(0, dpToPx(context, 8), 0, 0)
+        }
+        loadingLayout.addView(loadingText)
+
+        val loadLp = FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            Gravity.CENTER
+        )
+        webContainer.addView(loadingLayout, loadLp)
+
+        val webContainerLp = LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             0,
             1f
         )
-        webView = wv
-        contentColumn.addView(wv, wvLp)
+        contentColumn.addView(webContainer, webContainerLp)
 
         mainLayout.addView(contentColumn, contentLp)
 
@@ -702,7 +906,7 @@ object FloatingOverlayManager {
             row.addView(chip, chipLp)
         }
 
-        // '+' Button to add new tag!
+        // '+' Button to add new tag
         val addBtn = TextView(context).apply {
             text = "+ Tag"
             setTextColor(Color.WHITE)
@@ -742,13 +946,11 @@ object FloatingOverlayManager {
         newTagEditText?.let { disableInputFocus(it) }
     }
 
-    // Dynamic keyboard / focus management for WindowManager overlay
     private fun enableInputFocus(editText: EditText) {
         val wm = windowManager ?: return
         val root = overlayRootView ?: return
         val wmParams = currentWmParams ?: return
 
-        // Remove FLAG_NOT_FOCUSABLE so the window can accept text input
         wmParams.flags = wmParams.flags and WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE.inv()
         try {
             wm.updateViewLayout(root, wmParams)
@@ -768,27 +970,9 @@ object FloatingOverlayManager {
         imm?.hideSoftInputFromWindow(editText.windowToken, 0)
         editText.clearFocus()
 
-        // Restore FLAG_NOT_FOCUSABLE so touches outside pass through
         wmParams.flags = wmParams.flags or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
         try {
             wm.updateViewLayout(root, wmParams)
-        } catch (_: Exception) {}
-    }
-
-    fun switchInterfaceVersion(newVersion: InterfaceVersion) {
-        currentVersion = newVersion
-        val root = overlayRootView ?: return
-        val wm = windowManager ?: return
-        val wmParams = currentWmParams ?: return
-        val context = root.context
-
-        isSidebarDocked = false
-        applyVersionGeometry(context, wmParams, newVersion)
-        buildOverlayViewHierarchy(context, root as FrameLayout, wmParams)
-
-        try {
-            wm.updateViewLayout(root, wmParams)
-            loadSearchQuery(currentQuery)
         } catch (_: Exception) {}
     }
 
@@ -802,13 +986,17 @@ object FloatingOverlayManager {
         }
     }
 
-    private fun loadSearchQuery(query: String) {
+    private fun loadSearchQuery(query: String, force: Boolean = false) {
         val encoded = URLEncoder.encode(query, StandardCharsets.UTF_8.toString())
         val searchUrl = "https://www.google.com/search?tbm=isch&q=$encoded"
 
-        if (searchUrl == lastLoadedUrl) return
+        if (!force && searchUrl == lastLoadedUrl) {
+            Log.d(TAG, "loadSearchQuery: URL already loaded ($searchUrl), skipping")
+            return
+        }
         lastLoadedUrl = searchUrl
 
+        Log.d(TAG, "loadSearchQuery: loading $searchUrl (force=$force)")
         webView?.loadUrl(searchUrl)
     }
 
@@ -912,7 +1100,6 @@ object FloatingOverlayManager {
                     if (Math.abs(dx) > dpToPx(context, 4) || Math.abs(dy) > dpToPx(context, 4)) {
                         isClick = false
 
-                        // If user drags towards the right edge in sidebar mode, dock it!
                         if (currentVersion == InterfaceVersion.SIDE_VERTICAL_CARDS && dx > dpToPx(context, 90)) {
                             dockToEdge(context)
                             return@setOnTouchListener true
@@ -955,21 +1142,8 @@ object FloatingOverlayManager {
 
     fun hideOverlay() {
         runOnMainThread {
-            try {
-                if (overlayRootView != null) {
-                    webView?.destroy()
-                    webView = null
-                    windowManager?.removeView(overlayRootView)
-                }
-            } catch (_: Exception) {
-            } finally {
-                overlayRootView = null
-                mainContainer = null
-                dockedEdgeTab = null
-                searchEditText = null
-                currentWmParams = null
-                CreatorDetectionBus.setOverlayShowing(false)
-            }
+            destroyCurrentOverlayViews()
+            CreatorDetectionBus.setOverlayShowing(false)
         }
     }
 
