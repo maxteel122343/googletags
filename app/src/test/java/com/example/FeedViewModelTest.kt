@@ -77,4 +77,15 @@ class FeedViewModelTest {
         assertEquals(1, viewModel.uiState.value.currentVideoIndex)
         assertEquals(secondCreator.nickname, viewModel.uiState.value.detectedNickname)
     }
+
+    @Test
+    fun testCreatorDetectionBusDispatch() {
+        com.example.data.service.CreatorDetectionBus.setActiveKeyword("look")
+        assertEquals("look", com.example.data.service.CreatorDetectionBus.activeSearchKeyword.value)
+
+        com.example.data.service.CreatorDetectionBus.dispatchDetectedCreator("fitwithjoao", "com.instagram.android")
+        assertEquals("fitwithjoao", com.example.data.service.CreatorDetectionBus.latestDetectedNickname.value)
+        assertEquals("com.instagram.android", com.example.data.service.CreatorDetectionBus.latestPackageName.value)
+    }
 }
+

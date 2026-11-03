@@ -12,10 +12,10 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -42,6 +42,8 @@ fun QuickModeSwitcherBar(
     onTemplateClick: () -> Unit,
     onSettingsClick: () -> Unit,
     onAccessibilityGuideClick: () -> Unit,
+    isRealOverlayShowing: Boolean = false,
+    onToggleRealOverlay: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val scrollState = rememberScrollState()
@@ -74,7 +76,7 @@ fun QuickModeSwitcherBar(
                     val isSelected = version == currentVersion
                     val label = when (version) {
                         InterfaceVersion.BOTTOM_HORIZONTAL_CARDS -> "V1 Reels"
-                        InterfaceVersion.SIDE_VERTICAL_CARDS -> "V2 Split Lateral"
+                        InterfaceVersion.SIDE_VERTICAL_CARDS -> "V2 Split"
                         InterfaceVersion.COMPACT_FLOATING_CARD -> "V3 Popup"
                         InterfaceVersion.FULL_SPLIT_SCREEN -> "V4 Google 50%"
                         InterfaceVersion.BOTTOM_SHEET -> "V5 Sheet"
@@ -92,7 +94,7 @@ fun QuickModeSwitcherBar(
                         Text(
                             text = label,
                             color = if (isSelected) Color.White else Color(0xFFDDDDDD),
-                            fontSize = 11.5.sp,
+                            fontSize = 11.sp,
                             fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
                         )
                     }
@@ -118,6 +120,21 @@ fun QuickModeSwitcherBar(
             }
 
             Spacer(modifier = Modifier.width(4.dp))
+
+            // Real WindowManager Overlay Toggle Button
+            IconButton(
+                onClick = onToggleRealOverlay,
+                modifier = Modifier
+                    .size(32.dp)
+                    .testTag("quick_toggle_overlay_button")
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Layers,
+                    contentDescription = "Toggle Real Floating Overlay",
+                    tint = if (isRealOverlayShowing) Color(0xFF81C995) else Color(0xFFB0B0B0),
+                    modifier = Modifier.size(19.dp)
+                )
+            }
 
             // Accessibility Guide button
             IconButton(

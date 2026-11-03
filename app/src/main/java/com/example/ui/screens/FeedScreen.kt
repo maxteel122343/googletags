@@ -85,6 +85,11 @@ fun FeedScreen(
         pageCount = { uiState.videos.size }
     )
 
+    // Refresh system permission and accessibility service status on startup
+    LaunchedEffect(Unit) {
+        viewModel.refreshSystemStatus(context)
+    }
+
     // Detect scroll change and notify ViewModel
     LaunchedEffect(pagerState) {
         snapshotFlow { pagerState.currentPage }.collect { page ->
@@ -384,7 +389,12 @@ fun FeedScreen(
             activeTemplateName = uiState.activeTemplate?.label ?: "Template",
             onTemplateClick = { viewModel.openSettingsDialog(true) },
             onSettingsClick = { viewModel.openSettingsDialog(true) },
-            onAccessibilityGuideClick = { viewModel.openAccessibilityDialog(true) },
+            onAccessibilityGuideClick = {
+                viewModel.refreshSystemStatus(context)
+                viewModel.openAccessibilityDialog(true)
+            },
+            isRealOverlayShowing = uiState.isRealOverlayShowing,
+            onToggleRealOverlay = { viewModel.toggleRealOverlay(context) },
             modifier = Modifier
                 .align(Alignment.TopCenter)
                 .windowInsetsPadding(WindowInsets.statusBars)
@@ -488,11 +498,15 @@ fun FeedScreen(
         // ACCESSIBILITY SERVICE GUIDE & SIMULATOR DIALOG
         if (uiState.showAccessibilityDialog) {
             AccessibilityGuideDialog(
-                onSimulateEvent = { appName ->
-                    val nextIndex = (uiState.currentVideoIndex + 1) % uiState.videos.size
-                    coroutineScope.launch {
-                        pagerState.animateScrollToPage(nextIndex)
-                    }
+                isAccessibilityConnected = uiState.isAccessibilityConnected,
+                isAccessibilityEnabledInSystem = uiState.isAccessibilityEnabledInSystem,
+                hasOverlayPermission = uiState.hasOverlayPermission,
+                isRealOverlayShowing = uiState.isRealOverlayShowing,
+                onOpenAccessibilitySettings = { viewModel.openAccessibilitySettings(context) },
+                onRequestOverlayPermission = { viewModel.requestOverlayPermission(context) },
+                onToggleRealOverlay = { viewModel.toggleRealOverlay(context) },
+                onSimulateEvent = { nickname, appName ->
+                    viewModel.simulateAccessibilityDetection(nickname, appName, context)
                 },
                 onDismiss = { viewModel.openAccessibilityDialog(false) }
             )

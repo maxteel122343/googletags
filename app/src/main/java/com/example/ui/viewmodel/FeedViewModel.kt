@@ -12,6 +12,8 @@ import com.example.data.model.SearchEngineType
 import com.example.data.model.SearchTemplate
 import com.example.data.model.WebSearchResult
 import com.example.data.repository.CreatorRepository
+import com.example.data.service.CreatorDetectionBus
+import com.example.data.service.FloatingOverlayManager
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -43,7 +45,11 @@ data class FeedUiState(
     val selectedSearchTab: String = "All",
     val showSettingsDialog: Boolean = false,
     val showAccessibilityDialog: Boolean = false,
-    val searchNotificationMessage: String? = null
+    val searchNotificationMessage: String? = null,
+    val isRealOverlayShowing: Boolean = false,
+    val isAccessibilityConnected: Boolean = false,
+    val isAccessibilityEnabledInSystem: Boolean = false,
+    val hasOverlayPermission: Boolean = false
 ) {
     val currentVideo: CreatorVideo
         get() = videos.getOrElse(currentVideoIndex) { videos.first() }
@@ -69,6 +75,86 @@ class FeedViewModel : ViewModel() {
                 activeWebResults = initialVideo.webResults
             )
         }
+
+        // Listen for live creator detection events from Accessibility Service
+        viewModelScope.launch {
+            CreatorDetectionBus.latestDetectedNickname.collect { liveNick ->
+                if (!liveNick.isNullOrBlank() && liveNick != _uiState.value.detectedNickname) {
+                    onCreatorDetectedExternally(liveNick)
+                }
+            }
+        }
+
+        // Listen for accessibility connection status
+        viewModelScope.launch {
+            CreatorDetectionBus.isAccessibilityConnected.collect { connected ->
+                _uiState.update { it.copy(isAccessibilityConnected = connected) }
+            }
+        }
+
+        // Listen for overlay display status
+        viewModelScope.launch {
+            CreatorDetectionBus.isOverlayShowing.collect { showing ->
+                _uiState.update { it.copy(isRealOverlayShowing = showing) }
+            }
+        }
+    }
+
+    fun refreshSystemStatus(context: Context) {
+        val hasOverlay = CreatorDetectionBus.hasOverlayPermission(context)
+        val isA11yEnabled = CreatorDetectionBus.isAccessibilityServiceEnabled(context)
+        val isA11yConnected = CreatorDetectionBus.isAccessibilityConnected.value
+        val isOverlayActive = CreatorDetectionBus.isOverlayShowing.value
+
+        _uiState.update {
+            it.copy(
+                hasOverlayPermission = hasOverlay,
+                isAccessibilityEnabledInSystem = isA11yEnabled,
+                isAccessibilityConnected = isA11yConnected,
+                isRealOverlayShowing = isOverlayActive
+            )
+        }
+    }
+
+    fun toggleRealOverlay(context: Context) {
+        CreatorDetectionBus.setActiveKeyword(_uiState.value.activeTemplate?.keyword ?: "")
+        CreatorDetectionBus.toggleRealOverlay(context, _uiState.value.detectedNickname)
+        refreshSystemStatus(context)
+    }
+
+    fun requestOverlayPermission(context: Context) {
+        CreatorDetectionBus.requestOverlayPermission(context)
+    }
+
+    fun openAccessibilitySettings(context: Context) {
+        CreatorDetectionBus.openAccessibilitySettings(context)
+    }
+
+    private fun onCreatorDetectedExternally(nickname: String) {
+        _uiState.update { current ->
+            // Check if matches one of the sample videos to show matched preview
+            val matchingIndex = current.videos.indexOfFirst {
+                it.nickname.equals(nickname, ignoreCase = true)
+            }
+            if (matchingIndex >= 0) {
+                current.copy(
+                    currentVideoIndex = matchingIndex,
+                    detectedNickname = nickname,
+                    isFloatingCardVisible = true
+                )
+            } else {
+                current.copy(
+                    detectedNickname = nickname,
+                    isFloatingCardVisible = true
+                )
+            }
+        }
+        triggerSearch(nickname, _uiState.value.activeTemplate?.keyword)
+    }
+
+    fun simulateAccessibilityDetection(nickname: String, appName: String, context: Context) {
+        CreatorDetectionBus.dispatchDetectedCreator(nickname, appName, context)
+        onCreatorDetectedExternally(nickname)
     }
 
     fun onVideoPageChanged(index: Int) {
@@ -88,6 +174,12 @@ class FeedViewModel : ViewModel() {
 
         if (_uiState.value.autoSearchEnabled) {
             triggerSearch(newNickname, _uiState.value.activeTemplate?.keyword)
+        }
+
+        // Update real floating overlay if open
+        if (FloatingOverlayManager.isShowing()) {
+            val query = buildSearchQuery(newNickname, _uiState.value.activeTemplate?.keyword)
+            FloatingOverlayManager.updateQuery(query)
         }
     }
 
@@ -118,7 +210,14 @@ class FeedViewModel : ViewModel() {
     fun setActiveTemplate(templateId: String) {
         _uiState.update { it.copy(activeTemplateId = templateId) }
         val template = _uiState.value.searchTemplates.find { it.id == templateId }
-        triggerSearch(_uiState.value.detectedNickname, template?.keyword)
+        val kw = template?.keyword ?: ""
+        CreatorDetectionBus.setActiveKeyword(kw)
+        triggerSearch(_uiState.value.detectedNickname, kw)
+
+        if (FloatingOverlayManager.isShowing()) {
+            val query = buildSearchQuery(_uiState.value.detectedNickname, kw)
+            FloatingOverlayManager.updateQuery(query)
+        }
     }
 
     fun addSearchTemplate(keyword: String, label: String) {
@@ -134,6 +233,7 @@ class FeedViewModel : ViewModel() {
                 activeTemplateId = newTemplate.id
             )
         }
+        CreatorDetectionBus.setActiveKeyword(newTemplate.keyword)
         triggerSearch(_uiState.value.detectedNickname, newTemplate.keyword)
     }
 
@@ -152,6 +252,9 @@ class FeedViewModel : ViewModel() {
     fun performCustomSearch(query: String) {
         _uiState.update { it.copy(activeSearchQuery = query) }
         triggerSearch(query, "")
+        if (FloatingOverlayManager.isShowing()) {
+            FloatingOverlayManager.updateQuery(query)
+        }
     }
 
     private fun triggerSearch(nicknameOrQuery: String, keyword: String?) {
@@ -159,7 +262,6 @@ class FeedViewModel : ViewModel() {
             _uiState.update { it.copy(isSearching = true) }
             val query = buildSearchQuery(nicknameOrQuery, keyword)
 
-            // Simulate realistic fast network response & detection transition
             delay(250)
 
             val currentVideo = _uiState.value.currentVideo
