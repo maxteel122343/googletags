@@ -14,42 +14,36 @@ enum class InterfaceVersion(
     ),
     SIDE_VERTICAL_CARDS(
         title = "2. Cards Verticais",
-        subtitle = "Lateral Direita (Split Screen)",
-        description = "Vídeo na esquerda e coluna com cards verticais de imagens do Google na direita.",
+        subtitle = "Lateral Direita (Sidebar)",
+        description = "Vídeo na esquerda e barra lateral direita com cards verticais de imagens do Google.",
         iconName = "vertical_split"
-    ),
-    COMPACT_FLOATING_CARD(
-        title = "3. Card Flutuante",
-        subtitle = "Popup Compacto (Overlay)",
-        description = "Pequeno card flutuante com dados do criador + Google e botão 'See more results'.",
-        iconName = "picture_in_picture"
-    ),
-    FULL_SPLIT_SCREEN(
-        title = "4. Tela Dividida 50/50",
-        subtitle = "Google Search Completo",
-        description = "Metade vídeo + metade Google Search escuro completo (All, Videos, Images, etc.).",
-        iconName = "splitscreen"
     ),
     BOTTOM_SHEET(
         title = "5. Bottom Sheet",
         subtitle = "Painel Deslizante",
-        description = "Painel expansível que sobe da base com resultados do Google (Instagram, YouTube, Blog).",
+        description = "Painel expansível que sobe da base com resultados do Google (redimensionável na borda superior).",
         iconName = "expand_less"
     ),
     EXTRACTED_IMAGES_SCROLL(
-        title = "6. Fotos Extraídas",
-        subtitle = "Horizontal Scroll (V6)",
-        description = "Painel inferior estilo V5 com extração JS das fotos do Google em rolagem horizontal limpa.",
-        iconName = "collections"
+        title = "6. Fotos na Vertical",
+        subtitle = "Vertical Limpo (V6)",
+        description = "Apenas as fotos do criador na vertical (uma abaixo da outra), sem página do Google e sem bordas.",
+        iconName = "view_stream"
     ),
     CAROUSEL_PHOTO_CARDS(
-        title = "7. Carrossel de Fotos",
-        subtitle = "Cards Horizontais (V7)",
-        description = "Cards elegantes em carrossel horizontal com fotos e dados extraídos do Google.",
+        title = "7. Fotos na Horizontal",
+        subtitle = "Carrossel Limpo (V7)",
+        description = "Apenas as fotos do criador na horizontal (deslize para o lado para ver a próxima), estilo carrossel grande e limpo.",
         iconName = "view_carousel"
     );
 
-    val id: Int get() = ordinal + 1
+    val id: Int get() = when (this) {
+        BOTTOM_HORIZONTAL_CARDS -> 1
+        SIDE_VERTICAL_CARDS -> 2
+        BOTTOM_SHEET -> 5
+        EXTRACTED_IMAGES_SCROLL -> 6
+        CAROUSEL_PHOTO_CARDS -> 7
+    }
 }
 
 enum class SearchEngineType(val displayName: String, val badge: String) {

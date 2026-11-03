@@ -62,8 +62,6 @@ import com.example.ui.components.QuickModeSwitcherBar
 import com.example.ui.components.SettingsDialog
 import com.example.ui.components.Version1BottomHorizontalCards
 import com.example.ui.components.Version2SideVerticalCards
-import com.example.ui.components.Version3CompactFloatingCard
-import com.example.ui.components.Version4FullSplitScreen
 import com.example.ui.components.Version5BottomSheet
 import com.example.ui.components.Version6ExtractedImagesScroll
 import com.example.ui.components.Version7CarouselPhotoCards
@@ -217,124 +215,6 @@ fun FeedScreen(
                 }
             }
 
-            // VERSION 3: COMPACT FLOATING CARD (Popup overlay on bottom right)
-            InterfaceVersion.COMPACT_FLOATING_CARD -> {
-                Box(modifier = Modifier.fillMaxSize()) {
-                    VerticalPager(
-                        state = pagerState,
-                        modifier = Modifier.fillMaxSize()
-                    ) { page ->
-                        val video = uiState.videos[page]
-                        VideoPlayerOverlay(
-                            video = video,
-                            isLiked = uiState.likedVideoIds.contains(video.id),
-                            isBookmarked = uiState.bookmarkedVideoIds.contains(video.id),
-                            isFollowing = uiState.followedNicknames.contains(video.nickname),
-                            onLikeClick = { viewModel.toggleLike(video.id) },
-                            onBookmarkClick = { viewModel.toggleBookmark(video.id) },
-                            onFollowClick = { viewModel.toggleFollow(video.nickname) },
-                            onShareClick = {
-                                viewModel.openInBrowser(context, "https://www.google.com/search?q=${video.nickname}")
-                            },
-                            onCommentClick = {
-                                Toast.makeText(context, "${video.commentsCount} comentários", Toast.LENGTH_SHORT).show()
-                            },
-                            contentPaddingBottom = 54
-                        )
-                    }
-
-                    // Compact floating card on bottom right
-                    if (uiState.isFloatingCardVisible) {
-                        Version3CompactFloatingCard(
-                            video = currentVideo,
-                            searchQuery = uiState.activeSearchQuery,
-                            isVisible = uiState.isFloatingCardVisible,
-                            onDismiss = { viewModel.dismissFloatingCard() },
-                            onSeeMoreResults = {
-                                viewModel.openInBrowser(context, uiState.activeSearchQuery)
-                            },
-                            modifier = Modifier
-                                .align(Alignment.BottomEnd)
-                                .padding(end = 12.dp, bottom = 66.dp)
-                        )
-                    } else {
-                        // Restore icon pill if dismissed
-                        Box(
-                            modifier = Modifier
-                                .align(Alignment.BottomEnd)
-                                .padding(end = 16.dp, bottom = 70.dp)
-                                .clip(RoundedCornerShape(20.dp))
-                                .background(Color(0xCC000000))
-                                .clickable { viewModel.showFloatingCard() }
-                                .padding(horizontal = 10.dp, vertical = 6.dp)
-                                .testTag("restore_floating_card_button")
-                        ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                GoogleIconBadge(size = 14.dp)
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text(
-                                    text = "Ver busca",
-                                    color = Color.White,
-                                    fontSize = 11.5.sp,
-                                    fontWeight = FontWeight.Medium
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-
-            // VERSION 4: FULL SPLIT SCREEN 50/50 (Google Dark Search on Right)
-            InterfaceVersion.FULL_SPLIT_SCREEN -> {
-                Row(modifier = Modifier.fillMaxSize()) {
-                    // Left 50%: Short video player
-                    Box(
-                        modifier = Modifier
-                            .weight(0.50f)
-                            .fillMaxHeight()
-                    ) {
-                        VerticalPager(
-                            state = pagerState,
-                            modifier = Modifier.fillMaxSize()
-                        ) { page ->
-                            val video = uiState.videos[page]
-                            VideoPlayerOverlay(
-                                video = video,
-                                isLiked = uiState.likedVideoIds.contains(video.id),
-                                isBookmarked = uiState.bookmarkedVideoIds.contains(video.id),
-                                isFollowing = uiState.followedNicknames.contains(video.nickname),
-                                onLikeClick = { viewModel.toggleLike(video.id) },
-                                onBookmarkClick = { viewModel.toggleBookmark(video.id) },
-                                onFollowClick = { viewModel.toggleFollow(video.nickname) },
-                                onShareClick = {
-                                    viewModel.openInBrowser(context, "https://www.google.com/search?q=${video.nickname}")
-                                },
-                                onCommentClick = {
-                                    Toast.makeText(context, "${video.commentsCount} comentários", Toast.LENGTH_SHORT).show()
-                                },
-                                contentPaddingBottom = 54
-                            )
-                        }
-                    }
-
-                    // Right 50%: Google Search dark mode
-                    Box(
-                        modifier = Modifier
-                            .weight(0.50f)
-                            .fillMaxHeight()
-                            .padding(bottom = 54.dp)
-                    ) {
-                        Version4FullSplitScreen(
-                            video = currentVideo,
-                            searchQuery = uiState.activeSearchQuery,
-                            selectedTab = uiState.selectedSearchTab,
-                            onTabSelected = { viewModel.setSelectedSearchTab(it) },
-                            onOpenUrl = { viewModel.openInBrowser(context, it) },
-                            modifier = Modifier.fillMaxSize()
-                        )
-                    }
-                }
-            }
 
             // VERSION 5: BOTTOM SHEET SEARCH RESULTS
             InterfaceVersion.BOTTOM_SHEET -> {

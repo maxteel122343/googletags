@@ -76,12 +76,10 @@ fun QuickModeSwitcherBar(
                     val isSelected = version == currentVersion
                     val label = when (version) {
                         InterfaceVersion.BOTTOM_HORIZONTAL_CARDS -> "V1 Reels"
-                        InterfaceVersion.SIDE_VERTICAL_CARDS -> "V2 Split"
-                        InterfaceVersion.COMPACT_FLOATING_CARD -> "V3 Popup"
-                        InterfaceVersion.FULL_SPLIT_SCREEN -> "V4 Google 50%"
+                        InterfaceVersion.SIDE_VERTICAL_CARDS -> "V2 Sidebar"
                         InterfaceVersion.BOTTOM_SHEET -> "V5 Sheet"
-                        InterfaceVersion.EXTRACTED_IMAGES_SCROLL -> "V6 Fotos"
-                        InterfaceVersion.CAROUSEL_PHOTO_CARDS -> "V7 Cards"
+                        InterfaceVersion.EXTRACTED_IMAGES_SCROLL -> "V6 Vertical"
+                        InterfaceVersion.CAROUSEL_PHOTO_CARDS -> "V7 Horizontal"
                     }
 
                     Box(

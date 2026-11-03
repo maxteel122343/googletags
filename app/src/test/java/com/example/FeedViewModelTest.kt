@@ -35,12 +35,6 @@ class FeedViewModelTest {
         viewModel.setInterfaceVersion(InterfaceVersion.SIDE_VERTICAL_CARDS)
         assertEquals(InterfaceVersion.SIDE_VERTICAL_CARDS, viewModel.uiState.value.activeInterfaceVersion)
 
-        viewModel.setInterfaceVersion(InterfaceVersion.COMPACT_FLOATING_CARD)
-        assertEquals(InterfaceVersion.COMPACT_FLOATING_CARD, viewModel.uiState.value.activeInterfaceVersion)
-
-        viewModel.setInterfaceVersion(InterfaceVersion.FULL_SPLIT_SCREEN)
-        assertEquals(InterfaceVersion.FULL_SPLIT_SCREEN, viewModel.uiState.value.activeInterfaceVersion)
-
         viewModel.setInterfaceVersion(InterfaceVersion.BOTTOM_SHEET)
         assertEquals(InterfaceVersion.BOTTOM_SHEET, viewModel.uiState.value.activeInterfaceVersion)
 
@@ -49,6 +43,9 @@ class FeedViewModelTest {
 
         viewModel.setInterfaceVersion(InterfaceVersion.CAROUSEL_PHOTO_CARDS)
         assertEquals(InterfaceVersion.CAROUSEL_PHOTO_CARDS, viewModel.uiState.value.activeInterfaceVersion)
+
+        viewModel.setInterfaceVersion(InterfaceVersion.BOTTOM_HORIZONTAL_CARDS)
+        assertEquals(InterfaceVersion.BOTTOM_HORIZONTAL_CARDS, viewModel.uiState.value.activeInterfaceVersion)
     }
 
     @Test

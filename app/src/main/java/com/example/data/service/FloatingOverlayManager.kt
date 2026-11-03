@@ -37,6 +37,7 @@ import android.widget.HorizontalScrollView
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ProgressBar
+import android.widget.ScrollView
 import android.widget.TextView
 import coil.ImageLoader
 import coil.request.ImageRequest
@@ -48,22 +49,21 @@ import java.nio.charset.StandardCharsets
 
 /**
  * Manages the real system WindowManager floating overlay over TikTok, Instagram,
- * YouTube Shorts, or any third-party app.
+ * YouTube Shorts, Facebook Reels, and Bluesky.
  *
- * Supports 7 interface versions:
- * - V1: Bottom Horizontal Cards (Reels style bar)
+ * Supported 5 interface versions (duplicates V3 and V4 removed):
+ * - V1: Bottom Horizontal Cards (Reels style bottom bar)
  * - V2: Sidebar Vertical Cards (Split screen right edge with resize & dock)
- * - V3: Compact Floating Card (Popup card)
- * - V4: Full Split Screen 50/50 (Google Dark Search)
  * - V5: Bottom Sheet (Resizable height via top drag handle)
- * - V6: Bottom Sheet with JavaScript Extracted Google Images Horizontal Scroll
- * - V7: Horizontal Photo Cards Carousel with Extracted Google Images
+ * - V6: Fotos na Vertical (Clean vertical stream of photos only, no Google webpage/chrome)
+ * - V7: Fotos na Horizontal (Clean horizontal swipe carousel of large photos, edge-to-edge)
  *
- * Features:
- * - Instant query reload on TikTok/Instagram feed scroll detection
- * - Top-edge draggable height resize for Bottom Sheet (V5 & V6)
- * - Headless/Live JavaScript image extraction from Google Search DOM
- * - Smooth state preservation across versions and scroll changes
+ * Key features:
+ * - Natural 1:1 drag movement (drag left moves left, drag down moves down)
+ * - Pure, clean photos in V6 and V7 (no Google webpage, no outer borders, no Google header)
+ * - Dynamic height resize for Bottom Sheet and Photo sheets
+ * - Instant forced search query update on scroll detection
+ * - State and search query preservation across version switches
  */
 object FloatingOverlayManager {
 
@@ -122,7 +122,7 @@ object FloatingOverlayManager {
     private var currentWmParams: WindowManager.LayoutParams? = null
     private var lastContext: Context? = null
 
-    private var mainContainer: LinearLayout? = null
+    private var mainContainer: View? = null
     private var webView: WebView? = null
     private var searchEditText: EditText? = null
     private var progressBar: ProgressBar? = null
@@ -132,10 +132,10 @@ object FloatingOverlayManager {
     private var newTagEditText: EditText? = null
     private var dockedEdgeTab: LinearLayout? = null
 
-    // For V6 and V7 extracted images
-    private var extractedImagesScrollContainer: HorizontalScrollView? = null
-    private var extractedImagesRow: LinearLayout? = null
-    private var extractedLoadingText: TextView? = null
+    // Photo containers for V6 and V7
+    private var verticalPhotosContainer: LinearLayout? = null
+    private var horizontalPhotosContainer: LinearLayout? = null
+    private var photosLoadingBadge: TextView? = null
 
     private var currentVersion = InterfaceVersion.SIDE_VERTICAL_CARDS
     private var currentQuery = "ju.pasqualotto fotos"
@@ -144,7 +144,7 @@ object FloatingOverlayManager {
     private var sidebarWidthPx = 0
     private var bottomSheetHeightPx = 0
 
-    // Cached extracted images
+    // Extracted image URLs cache
     private val extractedImageUrls = mutableListOf<String>()
 
     fun isShowing(): Boolean = overlayRootView != null
@@ -228,11 +228,6 @@ object FloatingOverlayManager {
         }
     }
 
-    /**
-     * Completely destroys the current overlay view hierarchy and WebView,
-     * removes from WindowManager, and recreates cleanly for the new InterfaceVersion.
-     * Preserves search query and extracted photos seamlessly.
-     */
     fun switchInterfaceVersion(newVersion: InterfaceVersion) {
         runOnMainThread {
             try {
@@ -302,7 +297,6 @@ object FloatingOverlayManager {
     private fun destroyCurrentOverlayViews() {
         Log.d(TAG, "destroyCurrentOverlayViews: releasing existing views and WebView")
 
-        // Destroy WebView cleanly
         webView?.let { wv ->
             try {
                 wv.stopLoading()
@@ -312,14 +306,12 @@ object FloatingOverlayManager {
                 wv.onPause()
                 (wv.parent as? ViewGroup)?.removeView(wv)
                 wv.destroy()
-                Log.d(TAG, "WebView destroyed")
             } catch (e: Exception) {
                 Log.e(TAG, "Error destroying WebView", e)
             }
         }
         webView = null
 
-        // Remove from WindowManager
         overlayRootView?.let { root ->
             try {
                 if (root.isAttachedToWindow) {
@@ -327,7 +319,6 @@ object FloatingOverlayManager {
                 } else {
                     windowManager?.removeView(root)
                 }
-                Log.d(TAG, "Root view removed from WindowManager")
             } catch (e: Exception) {
                 Log.e(TAG, "Error removing root from WindowManager", e)
             }
@@ -342,9 +333,9 @@ object FloatingOverlayManager {
         chipsRowLayout = null
         progressBar = null
         loadingContainer = null
-        extractedImagesScrollContainer = null
-        extractedImagesRow = null
-        extractedLoadingText = null
+        verticalPhotosContainer = null
+        horizontalPhotosContainer = null
+        photosLoadingBadge = null
         currentWmParams = null
     }
 
@@ -358,13 +349,13 @@ object FloatingOverlayManager {
         val screenH = dm.heightPixels
 
         when (version) {
-            // V1: Bottom Horizontal Cards (Reels style bar anchored to bottom)
+            // V1: Bottom Horizontal Cards
             InterfaceVersion.BOTTOM_HORIZONTAL_CARDS -> {
                 wmParams.gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
                 wmParams.x = 0
                 wmParams.y = dpToPx(context, 12)
                 wmParams.width = (screenW * 0.94f).toInt()
-                wmParams.height = dpToPx(context, 300)
+                wmParams.height = dpToPx(context, 320)
             }
 
             // V2: Side Vertical Cards (Sidebar docked to right edge)
@@ -379,25 +370,7 @@ object FloatingOverlayManager {
                 wmParams.height = screenH - dpToPx(context, 70)
             }
 
-            // V3: Compact Floating Card (Popup Window)
-            InterfaceVersion.COMPACT_FLOATING_CARD -> {
-                wmParams.gravity = Gravity.TOP or Gravity.START
-                wmParams.x = dpToPx(context, 16)
-                wmParams.y = dpToPx(context, 80)
-                wmParams.width = dpToPx(context, 340).coerceAtMost((screenW * 0.92f).toInt())
-                wmParams.height = dpToPx(context, 440)
-            }
-
-            // V4: Full Split Screen 50%
-            InterfaceVersion.FULL_SPLIT_SCREEN -> {
-                wmParams.gravity = Gravity.TOP or Gravity.END
-                wmParams.x = 0
-                wmParams.y = 0
-                wmParams.width = (screenW * 0.50f).toInt()
-                wmParams.height = screenH
-            }
-
-            // V5: Bottom Sheet (Google Search / Imagens)
+            // V5: Bottom Sheet with height resize
             InterfaceVersion.BOTTOM_SHEET -> {
                 wmParams.gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
                 wmParams.x = 0
@@ -409,25 +382,28 @@ object FloatingOverlayManager {
                 wmParams.height = bottomSheetHeightPx
             }
 
-            // V6: Bottom Sheet with JavaScript Extracted Google Images Horizontal Scroll
+            // V6: Clean Vertical Photos (Large photo stream)
             InterfaceVersion.EXTRACTED_IMAGES_SCROLL -> {
                 wmParams.gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
                 wmParams.x = 0
                 wmParams.y = 0
                 wmParams.width = screenW
                 if (bottomSheetHeightPx <= 0) {
-                    bottomSheetHeightPx = (screenH * 0.46f).toInt()
+                    bottomSheetHeightPx = (screenH * 0.58f).toInt()
                 }
                 wmParams.height = bottomSheetHeightPx
             }
 
-            // V7: Horizontal Photo Cards Carousel with Extracted Google Images
+            // V7: Clean Horizontal Photos (Swipe sideways, edge-to-edge)
             InterfaceVersion.CAROUSEL_PHOTO_CARDS -> {
                 wmParams.gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
                 wmParams.x = 0
-                wmParams.y = dpToPx(context, 8)
-                wmParams.width = (screenW * 0.96f).toInt()
-                wmParams.height = dpToPx(context, 320)
+                wmParams.y = 0
+                wmParams.width = screenW
+                if (bottomSheetHeightPx <= 0) {
+                    bottomSheetHeightPx = (screenH * 0.58f).toInt()
+                }
+                wmParams.height = bottomSheetHeightPx
             }
         }
     }
@@ -440,7 +416,7 @@ object FloatingOverlayManager {
     ) {
         root.removeAllViews()
 
-        // 1. DOCKED EDGE TAB (Visible when sidebar/window is minimized to edge)
+        // 1. DOCKED EDGE TAB (Visible when sidebar/window is docked to edge)
         val edgeTab = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -493,20 +469,22 @@ object FloatingOverlayManager {
 
         root.addView(edgeTab, edgeTabLp)
 
-        // 2. MAIN CONTAINER
-        val isHorizontal = currentVersion == InterfaceVersion.SIDE_VERTICAL_CARDS || currentVersion == InterfaceVersion.FULL_SPLIT_SCREEN
-        val isBottomSheetType = currentVersion == InterfaceVersion.BOTTOM_SHEET || currentVersion == InterfaceVersion.EXTRACTED_IMAGES_SCROLL
+        // 2. CHECK IF THIS IS A PURE PHOTO VERSION (V6 or V7)
+        if (currentVersion == InterfaceVersion.EXTRACTED_IMAGES_SCROLL || currentVersion == InterfaceVersion.CAROUSEL_PHOTO_CARDS) {
+            buildCleanPhotosOverlay(context, root, wmParams)
+            buildHeadlessWebView(context, root)
+            return
+        }
+
+        // 3. MAIN CONTAINER FOR V1, V2, V5
+        val isHorizontal = currentVersion == InterfaceVersion.SIDE_VERTICAL_CARDS
+        val isBottomSheetType = currentVersion == InterfaceVersion.BOTTOM_SHEET
+
         val mainLayout = LinearLayout(context).apply {
             orientation = if (isHorizontal) LinearLayout.HORIZONTAL else LinearLayout.VERTICAL
             val bg = GradientDrawable().apply {
                 setColor(Color.parseColor("#FA12141A"))
-                cornerRadius = if (isBottomSheetType) {
-                    dpToPx(context, 18).toFloat()
-                } else if (currentVersion == InterfaceVersion.FULL_SPLIT_SCREEN) {
-                    dpToPx(context, 8).toFloat()
-                } else {
-                    dpToPx(context, 18).toFloat()
-                }
+                cornerRadius = if (isBottomSheetType) dpToPx(context, 18).toFloat() else dpToPx(context, 16).toFloat()
                 setStroke(dpToPx(context, 1), Color.parseColor("#383E4E"))
             }
             background = bg
@@ -532,7 +510,6 @@ object FloatingOverlayManager {
             mainLayout.addView(leftResizeHandle, resizeLp)
         }
 
-        // Inner vertical column for content
         val contentColumn = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(
@@ -543,20 +520,12 @@ object FloatingOverlayManager {
             )
         }
         val contentLp = if (isHorizontal) {
-            LinearLayout.LayoutParams(
-                0,
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                1f
-            )
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f)
         } else {
-            LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT
-            )
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
         }
 
-        // TOP BAR: Drag Handle Pill
-        // For V5 and V6, this handle resizes the bottom sheet height dynamically!
+        // TOP DRAG HANDLE
         val dragHandleContainer = FrameLayout(context).apply {
             setPadding(0, dpToPx(context, 4), 0, dpToPx(context, 6))
         }
@@ -581,14 +550,13 @@ object FloatingOverlayManager {
         )
         contentColumn.addView(dragHandleContainer, dragContainerLp)
 
-        // Setup top drag handle listener
         if (isBottomSheetType) {
             setupBottomSheetHeightResizeListener(context, dragHandleContainer, wmParams)
         } else {
             setupDraggableTouchListener(context, dragHandleContainer, wmParams)
         }
 
-        // HEADER: Mode Pills (V1..V7) + Browser Icon + Dock Icon + Close Icon
+        // HEADER: Mode Switcher Pills (V1, V2, V5, V6, V7) + Browser Icon + Dock Icon + Close Icon
         val headerRow = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -600,10 +568,7 @@ object FloatingOverlayManager {
             setMargins(0, 0, 0, dpToPx(context, 6))
         }
 
-        // Mode switch pills
-        val modeScroll = HorizontalScrollView(context).apply {
-            isHorizontalScrollBarEnabled = false
-        }
+        val modeScroll = HorizontalScrollView(context).apply { isHorizontalScrollBarEnabled = false }
         val modeScrollLp = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
 
         val modeRow = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
@@ -612,8 +577,6 @@ object FloatingOverlayManager {
             val verLabel = when (ver) {
                 InterfaceVersion.BOTTOM_HORIZONTAL_CARDS -> "V1"
                 InterfaceVersion.SIDE_VERTICAL_CARDS -> "V2"
-                InterfaceVersion.COMPACT_FLOATING_CARD -> "V3"
-                InterfaceVersion.FULL_SPLIT_SCREEN -> "V4"
                 InterfaceVersion.BOTTOM_SHEET -> "V5"
                 InterfaceVersion.EXTRACTED_IMAGES_SCROLL -> "V6"
                 InterfaceVersion.CAROUSEL_PHOTO_CARDS -> "V7"
@@ -644,48 +607,39 @@ object FloatingOverlayManager {
         modeScroll.addView(modeRow)
         headerRow.addView(modeScroll, modeScrollLp)
 
-        // External browser button
         val browserBtn = TextView(context).apply {
             text = "↗"
             setTextColor(Color.parseColor("#8AB4F8"))
             textSize = 15f
             typeface = android.graphics.Typeface.DEFAULT_BOLD
             setPadding(dpToPx(context, 6), 0, dpToPx(context, 6), 0)
-            setOnClickListener {
-                openExternalSearch(context, currentQuery)
-            }
+            setOnClickListener { openExternalSearch(context, currentQuery) }
         }
         headerRow.addView(browserBtn)
 
-        // Hide/Dock to edge button
         val dockBtn = TextView(context).apply {
             text = "◀"
             setTextColor(Color.parseColor("#81C995"))
             textSize = 13f
             typeface = android.graphics.Typeface.DEFAULT_BOLD
             setPadding(dpToPx(context, 6), 0, dpToPx(context, 6), 0)
-            setOnClickListener {
-                dockToEdge(context)
-            }
+            setOnClickListener { dockToEdge(context) }
         }
         headerRow.addView(dockBtn)
 
-        // Close button
         val closeBtn = TextView(context).apply {
             text = "✕"
             setTextColor(Color.parseColor("#E06060"))
             textSize = 14f
             typeface = android.graphics.Typeface.DEFAULT_BOLD
             setPadding(dpToPx(context, 6), 0, dpToPx(context, 6), 0)
-            setOnClickListener {
-                hideOverlay()
-            }
+            setOnClickListener { hideOverlay() }
         }
         headerRow.addView(closeBtn)
 
         contentColumn.addView(headerRow, headerRowLp)
 
-        // SEARCH BAR (Interactive EditText with keyboard support)
+        // SEARCH BAR
         val searchBarLayout = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -764,10 +718,8 @@ object FloatingOverlayManager {
 
         contentColumn.addView(searchBarLayout, searchBarLp)
 
-        // CHIPS ROW: Horizontal keywords + "+" Button
-        val chipsScroll = HorizontalScrollView(context).apply {
-            isHorizontalScrollBarEnabled = false
-        }
+        // CHIPS ROW
+        val chipsScroll = HorizontalScrollView(context).apply { isHorizontalScrollBarEnabled = false }
         val chipsScrollLp = LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT
@@ -780,13 +732,11 @@ object FloatingOverlayManager {
             gravity = Gravity.CENTER_VERTICAL
         }
         chipsRowLayout = chipsRow
-
         renderTagChips(context, chipsRow)
-
         chipsScroll.addView(chipsRow)
         contentColumn.addView(chipsScroll, chipsScrollLp)
 
-        // INLINE ADD-TAG BAR (Expands when clicking '+')
+        // INLINE ADD-TAG ROW
         val addTagRow = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -841,9 +791,7 @@ object FloatingOverlayManager {
             }
             background = cBg
             setPadding(dpToPx(context, 8), dpToPx(context, 4), dpToPx(context, 8), dpToPx(context, 4))
-            setOnClickListener {
-                confirmNewTag(context)
-            }
+            setOnClickListener { confirmNewTag(context) }
         }
         addTagRow.addView(confirmTagBtn)
 
@@ -874,16 +822,8 @@ object FloatingOverlayManager {
         progressBar = pBar
         contentColumn.addView(pBar, pBarLp)
 
-        // CONTENT DISPLAY (WebView vs V6/V7 extracted images)
-        if (currentVersion == InterfaceVersion.EXTRACTED_IMAGES_SCROLL || currentVersion == InterfaceVersion.CAROUSEL_PHOTO_CARDS) {
-            // V6 & V7: Render Horizontal Images Display
-            buildExtractedImagesDisplay(context, contentColumn)
-            // Headless/minimal WebView in background to extract images
-            buildHeadlessWebView(context, contentColumn)
-        } else {
-            // V1..V5: Direct Interactive Google WebView
-            buildInteractiveWebContainer(context, contentColumn)
-        }
+        // INTERACTIVE WEBVIEW CONTAINER
+        buildInteractiveWebContainer(context, contentColumn)
 
         mainLayout.addView(contentColumn, contentLp)
 
@@ -893,9 +833,282 @@ object FloatingOverlayManager {
         )
         root.addView(mainLayout, mainLp)
 
-        // Setup drag listener for header if not bottom sheet
         if (!isBottomSheetType) {
             setupDraggableTouchListener(context, headerRow, wmParams)
+        }
+    }
+
+    /**
+     * Builds clean, edge-to-edge photo viewer for V6 and V7.
+     * ZERO Google headers, ZERO Google search web chrome, ZERO bulky borders.
+     * Just clean, full photos with a subtle top floating control pill.
+     */
+    private fun buildCleanPhotosOverlay(
+        context: Context,
+        root: FrameLayout,
+        wmParams: WindowManager.LayoutParams
+    ) {
+        val isVertical = currentVersion == InterfaceVersion.EXTRACTED_IMAGES_SCROLL
+
+        val container = FrameLayout(context).apply {
+            val bg = GradientDrawable().apply {
+                setColor(Color.parseColor("#E60D0F14"))
+                cornerRadius = dpToPx(context, 20).toFloat()
+                setStroke(dpToPx(context, 1), Color.parseColor("#2C3140"))
+            }
+            background = bg
+            clipToOutline = true
+            visibility = if (isSidebarDocked) View.GONE else View.VISIBLE
+        }
+        mainContainer = container
+
+        // 1. PHOTOS SCROLL VIEW (V6 = Vertical Scroll, V7 = Horizontal Scroll)
+        if (isVertical) {
+            // V6: Vertical photos stream
+            val vScroll = ScrollView(context).apply {
+                isVerticalScrollBarEnabled = false
+            }
+            val vCol = LinearLayout(context).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dpToPx(context, 10), dpToPx(context, 50), dpToPx(context, 10), dpToPx(context, 16))
+            }
+            verticalPhotosContainer = vCol
+            vScroll.addView(vCol)
+            container.addView(vScroll, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        } else {
+            // V7: Horizontal photos carousel
+            val hScroll = HorizontalScrollView(context).apply {
+                isHorizontalScrollBarEnabled = false
+            }
+            val hRow = LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                setPadding(dpToPx(context, 12), dpToPx(context, 50), dpToPx(context, 12), dpToPx(context, 16))
+            }
+            horizontalPhotosContainer = hRow
+            hScroll.addView(hRow)
+            container.addView(hScroll, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        }
+
+        // 2. TOP FLOATING CONTROL BAR (Translucent, subtle floating pill over the photos)
+        val floatingControlPill = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            val pillBg = GradientDrawable().apply {
+                setColor(Color.parseColor("#CC181C26"))
+                cornerRadius = dpToPx(context, 16).toFloat()
+                setStroke(dpToPx(context, 1), Color.parseColor("#444F68"))
+            }
+            background = pillBg
+            setPadding(dpToPx(context, 10), dpToPx(context, 4), dpToPx(context, 10), dpToPx(context, 4))
+        }
+        val pillLp = FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+            setMargins(dpToPx(context, 12), dpToPx(context, 8), dpToPx(context, 12), 0)
+        }
+
+        // Top drag handle / title inside the pill
+        val titleBadge = TextView(context).apply {
+            text = if (isVertical) "📸 V6: Fotos Vertical" else "🖼️ V7: Fotos Horizontal"
+            setTextColor(Color.WHITE)
+            textSize = 11.5f
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+        }
+        floatingControlPill.addView(titleBadge)
+
+        val statusBadge = TextView(context).apply {
+            text = " • Fotos"
+            setTextColor(Color.parseColor("#8AB4F8"))
+            textSize = 10.5f
+        }
+        photosLoadingBadge = statusBadge
+        floatingControlPill.addView(statusBadge)
+
+        val spacer = View(context)
+        floatingControlPill.addView(spacer, LinearLayout.LayoutParams(0, 0, 1f))
+
+        // Version switch pills
+        InterfaceVersion.entries.forEach { ver ->
+            val isCurrent = ver == currentVersion
+            val verLabel = when (ver) {
+                InterfaceVersion.BOTTOM_HORIZONTAL_CARDS -> "V1"
+                InterfaceVersion.SIDE_VERTICAL_CARDS -> "V2"
+                InterfaceVersion.BOTTOM_SHEET -> "V5"
+                InterfaceVersion.EXTRACTED_IMAGES_SCROLL -> "V6"
+                InterfaceVersion.CAROUSEL_PHOTO_CARDS -> "V7"
+            }
+            val p = TextView(context).apply {
+                text = verLabel
+                setTextColor(if (isCurrent) Color.WHITE else Color.parseColor("#999999"))
+                textSize = 10f
+                typeface = android.graphics.Typeface.DEFAULT_BOLD
+                val pBg = GradientDrawable().apply {
+                    setColor(if (isCurrent) Color.parseColor("#4285F4") else Color.parseColor("#262A36"))
+                    cornerRadius = dpToPx(context, 6).toFloat()
+                }
+                background = pBg
+                setPadding(dpToPx(context, 6), dpToPx(context, 2), dpToPx(context, 6), dpToPx(context, 2))
+                setOnClickListener { CreatorDetectionBus.setInterfaceVersion(ver) }
+            }
+            val pLp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                setMargins(0, 0, dpToPx(context, 4), 0)
+            }
+            floatingControlPill.addView(p, pLp)
+        }
+
+        val dockBtn = TextView(context).apply {
+            text = "◀"
+            setTextColor(Color.parseColor("#81C995"))
+            textSize = 12f
+            setPadding(dpToPx(context, 4), 0, dpToPx(context, 4), 0)
+            setOnClickListener { dockToEdge(context) }
+        }
+        floatingControlPill.addView(dockBtn)
+
+        val closeBtn = TextView(context).apply {
+            text = "✕"
+            setTextColor(Color.parseColor("#E06060"))
+            textSize = 13f
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+            setPadding(dpToPx(context, 6), 0, dpToPx(context, 2), 0)
+            setOnClickListener { hideOverlay() }
+        }
+        floatingControlPill.addView(closeBtn)
+
+        container.addView(floatingControlPill, pillLp)
+
+        // Make top control pill support resizing or dragging
+        setupBottomSheetHeightResizeListener(context, floatingControlPill, wmParams)
+
+        root.addView(container, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+
+        // Populate photos immediately
+        populateCleanPhotosUi(context)
+    }
+
+    private fun populateCleanPhotosUi(context: Context) {
+        val nick = CreatorDetectionBus.latestDetectedNickname.value ?: currentQuery.split(" ").firstOrNull() ?: "criador"
+        val activeKw = CreatorDetectionBus.activeSearchKeyword.value
+
+        val imagesToDisplay: List<String> = if (extractedImageUrls.isNotEmpty()) {
+            extractedImageUrls
+        } else {
+            val sample = CreatorRepository.sampleVideos.find { it.nickname.contains(nick, ignoreCase = true) }
+                ?: CreatorRepository.sampleVideos.first()
+            sample.imageResults.map { it.assetFileName ?: it.title }
+        }
+
+        photosLoadingBadge?.text = " • ${imagesToDisplay.size} fotos"
+
+        if (currentVersion == InterfaceVersion.EXTRACTED_IMAGES_SCROLL) {
+            // V6: Vertical photos list (large, full width, stacked)
+            val vCol = verticalPhotosContainer ?: return
+            vCol.removeAllViews()
+
+            imagesToDisplay.forEachIndexed { index, imgSource ->
+                val card = FrameLayout(context).apply {
+                    val cBg = GradientDrawable().apply {
+                        setColor(Color.parseColor("#171A24"))
+                        cornerRadius = dpToPx(context, 16).toFloat()
+                    }
+                    background = cBg
+                    clipToOutline = true
+                    setOnClickListener { openExternalSearch(context, "$nick $activeKw") }
+                }
+                val cardLp = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    dpToPx(context, 320)
+                ).apply {
+                    setMargins(0, 0, 0, dpToPx(context, 12))
+                }
+
+                val iv = ImageView(context).apply {
+                    scaleType = ImageView.ScaleType.CENTER_CROP
+                }
+                loadImageItem(context, imgSource, iv)
+                card.addView(iv, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+
+                // Corner tag
+                val badge = TextView(context).apply {
+                    text = "@$nick • #${index + 1}"
+                    setTextColor(Color.WHITE)
+                    textSize = 10f
+                    typeface = android.graphics.Typeface.DEFAULT_BOLD
+                    val bBg = GradientDrawable().apply {
+                        setColor(Color.parseColor("#B3000000"))
+                        cornerRadius = dpToPx(context, 6).toFloat()
+                    }
+                    background = bBg
+                    setPadding(dpToPx(context, 8), dpToPx(context, 3), dpToPx(context, 8), dpToPx(context, 3))
+                }
+                val badgeLp = FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    Gravity.BOTTOM or Gravity.START
+                ).apply {
+                    setMargins(dpToPx(context, 10), 0, 0, dpToPx(context, 10))
+                }
+                card.addView(badge, badgeLp)
+
+                vCol.addView(card, cardLp)
+            }
+        } else if (currentVersion == InterfaceVersion.CAROUSEL_PHOTO_CARDS) {
+            // V7: Horizontal photos carousel (large, edge-to-edge swipe sideways)
+            val hRow = horizontalPhotosContainer ?: return
+            hRow.removeAllViews()
+
+            val dm = context.resources.displayMetrics
+            val cardW = (dm.widthPixels * 0.86f).toInt()
+
+            imagesToDisplay.forEachIndexed { index, imgSource ->
+                val card = FrameLayout(context).apply {
+                    val cBg = GradientDrawable().apply {
+                        setColor(Color.parseColor("#171A24"))
+                        cornerRadius = dpToPx(context, 18).toFloat()
+                    }
+                    background = cBg
+                    clipToOutline = true
+                    setOnClickListener { openExternalSearch(context, "$nick $activeKw") }
+                }
+                val cardLp = LinearLayout.LayoutParams(
+                    cardW,
+                    ViewGroup.LayoutParams.MATCH_PARENT
+                ).apply {
+                    setMargins(0, 0, dpToPx(context, 12), 0)
+                }
+
+                val iv = ImageView(context).apply {
+                    scaleType = ImageView.ScaleType.CENTER_CROP
+                }
+                loadImageItem(context, imgSource, iv)
+                card.addView(iv, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+
+                // Corner tag
+                val badge = TextView(context).apply {
+                    text = "@$nick • #$activeKw (${index + 1}/${imagesToDisplay.size})"
+                    setTextColor(Color.WHITE)
+                    textSize = 10.5f
+                    typeface = android.graphics.Typeface.DEFAULT_BOLD
+                    val bBg = GradientDrawable().apply {
+                        setColor(Color.parseColor("#B3000000"))
+                        cornerRadius = dpToPx(context, 6).toFloat()
+                    }
+                    background = bBg
+                    setPadding(dpToPx(context, 8), dpToPx(context, 4), dpToPx(context, 8), dpToPx(context, 4))
+                }
+                val badgeLp = FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    Gravity.BOTTOM or Gravity.START
+                ).apply {
+                    setMargins(dpToPx(context, 12), 0, 0, dpToPx(context, 12))
+                }
+                card.addView(badge, badgeLp)
+
+                hRow.addView(card, cardLp)
+            }
         }
     }
 
@@ -962,10 +1175,7 @@ object FloatingOverlayManager {
                 }
             }
         }
-        val wvLp = FrameLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.MATCH_PARENT
-        )
+        val wvLp = FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
         webContainer.addView(wv, wvLp)
         webView = wv
 
@@ -1005,7 +1215,7 @@ object FloatingOverlayManager {
         parent.addView(webContainer, webContainerLp)
     }
 
-    private fun buildHeadlessWebView(context: Context, parent: LinearLayout) {
+    private fun buildHeadlessWebView(context: Context, root: FrameLayout) {
         val wv = WebView(context).apply {
             setBackgroundColor(Color.TRANSPARENT)
             settings.apply {
@@ -1021,26 +1231,8 @@ object FloatingOverlayManager {
                 handleExtractedImages(context, urls)
             }, "ImageExtractor")
 
-            webChromeClient = object : WebChromeClient() {
-                override fun onProgressChanged(view: WebView?, newProgress: Int) {
-                    if (newProgress in 1..99) {
-                        progressBar?.visibility = View.VISIBLE
-                        progressBar?.progress = newProgress
-                    } else {
-                        progressBar?.visibility = View.GONE
-                    }
-                }
-            }
-
             webViewClient = object : WebViewClient() {
-                override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
-                    progressBar?.visibility = View.VISIBLE
-                    extractedLoadingText?.visibility = View.VISIBLE
-                }
-
                 override fun onPageFinished(view: WebView?, url: String?) {
-                    progressBar?.visibility = View.GONE
-                    // Trigger extraction immediately and again after 800ms for lazy images
                     view?.evaluateJavascript(JS_IMAGE_EXTRACTION_SCRIPT, null)
                     Handler(Looper.getMainLooper()).postDelayed({
                         view?.evaluateJavascript(JS_IMAGE_EXTRACTION_SCRIPT, null)
@@ -1048,63 +1240,12 @@ object FloatingOverlayManager {
                 }
             }
         }
-        // Minimal 1dp view so WebKit processes layout and loads DOM images
-        val wvLp = LinearLayout.LayoutParams(1, 1)
-        parent.addView(wv, wvLp)
+        // Minimal 1x1 view so layout engine renders DOM images
+        val wvLp = FrameLayout.LayoutParams(1, 1).apply {
+            gravity = Gravity.TOP or Gravity.START
+        }
+        root.addView(wv, wvLp)
         webView = wv
-    }
-
-    private fun buildExtractedImagesDisplay(context: Context, parent: LinearLayout) {
-        val isCarousel = currentVersion == InterfaceVersion.CAROUSEL_PHOTO_CARDS
-
-        // Subtitle badge
-        val infoRow = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, 0, 0, dpToPx(context, 6))
-        }
-        val infoBadge = TextView(context).apply {
-            text = if (isCarousel) "📸 V7: CARROSSEL DE FOTOS (GOOGLE)" else "🖼️ V6: FOTOS EXTRAÍDAS (GOOGLE)"
-            setTextColor(Color.parseColor("#8AB4F8"))
-            textSize = 10.5f
-            typeface = android.graphics.Typeface.DEFAULT_BOLD
-        }
-        infoRow.addView(infoBadge)
-
-        val loadStatus = TextView(context).apply {
-            text = " • Carregando..."
-            setTextColor(Color.parseColor("#9AA0A6"))
-            textSize = 10.5f
-        }
-        extractedLoadingText = loadStatus
-        infoRow.addView(loadStatus)
-
-        parent.addView(infoRow)
-
-        // Horizontal scroll container
-        val scroll = HorizontalScrollView(context).apply {
-            isHorizontalScrollBarEnabled = true
-            isFillViewport = true
-        }
-        extractedImagesScrollContainer = scroll
-
-        val row = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-        extractedImagesRow = row
-
-        scroll.addView(row)
-
-        val scrollLp = LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            0,
-            1f
-        )
-        parent.addView(scroll, scrollLp)
-
-        // Populate with already cached images or initial fallback items
-        populateExtractedImagesUi(context)
     }
 
     private fun handleExtractedImages(context: Context, urls: List<String>) {
@@ -1112,156 +1253,7 @@ object FloatingOverlayManager {
             if (urls.isNotEmpty()) {
                 extractedImageUrls.clear()
                 extractedImageUrls.addAll(urls)
-                extractedLoadingText?.text = " • ${urls.size} fotos encontradas"
-                populateExtractedImagesUi(context)
-            }
-        }
-    }
-
-    private fun populateExtractedImagesUi(context: Context) {
-        val row = extractedImagesRow ?: return
-        row.removeAllViews()
-
-        val isCarousel = currentVersion == InterfaceVersion.CAROUSEL_PHOTO_CARDS
-        val nick = CreatorDetectionBus.latestDetectedNickname.value ?: currentQuery.split(" ").firstOrNull() ?: "criador"
-        val activeKw = CreatorDetectionBus.activeSearchKeyword.value
-
-        // If no images extracted yet, provide sample video images from CreatorRepository as instant preview
-        val imagesToDisplay: List<String> = if (extractedImageUrls.isNotEmpty()) {
-            extractedImageUrls
-        } else {
-            val sample = CreatorRepository.sampleVideos.find { it.nickname.contains(nick, ignoreCase = true) }
-                ?: CreatorRepository.sampleVideos.first()
-            sample.imageResults.map { it.assetFileName ?: it.title }
-        }
-
-        imagesToDisplay.forEachIndexed { index, imgItem ->
-            if (isCarousel) {
-                // V7: Styled Carousel Card
-                val card = LinearLayout(context).apply {
-                    orientation = LinearLayout.VERTICAL
-                    val cardBg = GradientDrawable().apply {
-                        setColor(Color.parseColor("#1C202C"))
-                        cornerRadius = dpToPx(context, 12).toFloat()
-                        setStroke(dpToPx(context, 1), Color.parseColor("#343B4D"))
-                    }
-                    background = cardBg
-                    elevation = dpToPx(context, 6).toFloat()
-                    clipToOutline = true
-                    setOnClickListener {
-                        openExternalSearch(context, "$nick $activeKw")
-                    }
-                }
-                val cardLp = LinearLayout.LayoutParams(
-                    dpToPx(context, 140),
-                    dpToPx(context, 185)
-                ).apply {
-                    setMargins(0, 0, dpToPx(context, 10), 0)
-                }
-
-                // Image inside Card
-                val iv = ImageView(context).apply {
-                    scaleType = ImageView.ScaleType.CENTER_CROP
-                }
-                loadImageItem(context, imgItem, iv)
-
-                val ivLp = LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    dpToPx(context, 120)
-                )
-                card.addView(iv, ivLp)
-
-                // Info footer
-                val footer = LinearLayout(context).apply {
-                    orientation = LinearLayout.VERTICAL
-                    setPadding(dpToPx(context, 8), dpToPx(context, 6), dpToPx(context, 8), dpToPx(context, 6))
-                }
-                val userTag = TextView(context).apply {
-                    text = "@$nick"
-                    setTextColor(Color.WHITE)
-                    textSize = 10.5f
-                    typeface = android.graphics.Typeface.DEFAULT_BOLD
-                    maxLines = 1
-                }
-                footer.addView(userTag)
-
-                val tagRow = LinearLayout(context).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    gravity = Gravity.CENTER_VERTICAL
-                }
-                val badge = TextView(context).apply {
-                    text = "#$activeKw"
-                    setTextColor(Color.parseColor("#8AB4F8"))
-                    textSize = 9.5f
-                }
-                tagRow.addView(badge)
-
-                val openIco = TextView(context).apply {
-                    text = "  ↗"
-                    setTextColor(Color.parseColor("#81C995"))
-                    textSize = 10f
-                    typeface = android.graphics.Typeface.DEFAULT_BOLD
-                }
-                tagRow.addView(openIco)
-
-                footer.addView(tagRow)
-                card.addView(footer)
-                row.addView(card, cardLp)
-
-            } else {
-                // V6: Streamlined Horizontal Scroll Image Thumbnails
-                val imgFrame = FrameLayout(context).apply {
-                    val frameBg = GradientDrawable().apply {
-                        setColor(Color.parseColor("#1B1F2A"))
-                        cornerRadius = dpToPx(context, 10).toFloat()
-                        setStroke(dpToPx(context, 1), Color.parseColor("#333A4B"))
-                    }
-                    background = frameBg
-                    clipToOutline = true
-                    setOnClickListener {
-                        openExternalSearch(context, "$nick $activeKw")
-                    }
-                }
-                val frameLp = LinearLayout.LayoutParams(
-                    dpToPx(context, 110),
-                    dpToPx(context, 140)
-                ).apply {
-                    setMargins(0, 0, dpToPx(context, 8), 0)
-                }
-
-                val iv = ImageView(context).apply {
-                    scaleType = ImageView.ScaleType.CENTER_CROP
-                }
-                loadImageItem(context, imgItem, iv)
-
-                val ivLp = FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.MATCH_PARENT
-                )
-                imgFrame.addView(iv, ivLp)
-
-                val numBadge = TextView(context).apply {
-                    text = "${index + 1}"
-                    setTextColor(Color.WHITE)
-                    textSize = 9f
-                    typeface = android.graphics.Typeface.DEFAULT_BOLD
-                    val nBg = GradientDrawable().apply {
-                        setColor(Color.parseColor("#CC000000"))
-                        cornerRadius = dpToPx(context, 4).toFloat()
-                    }
-                    background = nBg
-                    setPadding(dpToPx(context, 4), dpToPx(context, 1), dpToPx(context, 4), dpToPx(context, 1))
-                }
-                val numLp = FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
-                    Gravity.TOP or Gravity.START
-                ).apply {
-                    setMargins(dpToPx(context, 4), dpToPx(context, 4), 0, 0)
-                }
-                imgFrame.addView(numBadge, numLp)
-
-                row.addView(imgFrame, frameLp)
+                populateCleanPhotosUi(context)
             }
         }
     }
@@ -1347,7 +1339,6 @@ object FloatingOverlayManager {
             row.addView(chip, chipLp)
         }
 
-        // '+' Button to add new tag
         val addBtn = TextView(context).apply {
             text = "+ Tag"
             setTextColor(Color.WHITE)
@@ -1417,9 +1408,6 @@ object FloatingOverlayManager {
         } catch (_: Exception) {}
     }
 
-    /**
-     * Updates the active query and forces immediate reload in the Google search engine.
-     */
     fun updateQuery(newQuery: String, forceReload: Boolean = false) {
         if (newQuery.isBlank()) return
         val queryChanged = (currentQuery != newQuery)
@@ -1430,6 +1418,9 @@ object FloatingOverlayManager {
             chipsRowLayout?.let { row ->
                 lastContext?.let { ctx -> renderTagChips(ctx, row) }
             }
+            if (currentVersion == InterfaceVersion.EXTRACTED_IMAGES_SCROLL || currentVersion == InterfaceVersion.CAROUSEL_PHOTO_CARDS) {
+                lastContext?.let { populateCleanPhotosUi(it) }
+            }
             loadSearchQuery(newQuery, force = forceReload || queryChanged)
         }
     }
@@ -1439,7 +1430,6 @@ object FloatingOverlayManager {
         val searchUrl = "https://www.google.com/search?tbm=isch&q=$encoded"
 
         if (!force && searchUrl == lastLoadedUrl) {
-            Log.d(TAG, "loadSearchQuery: URL already loaded ($searchUrl), skipping")
             return
         }
         lastLoadedUrl = searchUrl
@@ -1447,7 +1437,7 @@ object FloatingOverlayManager {
         Log.d(TAG, "loadSearchQuery: loading $searchUrl (force=$force)")
         progressBar?.visibility = View.VISIBLE
         loadingContainer?.visibility = View.VISIBLE
-        extractedLoadingText?.text = " • Buscando no Google..."
+        photosLoadingBadge?.text = " • Buscando..."
 
         webView?.let { wv ->
             wv.stopLoading()
@@ -1490,10 +1480,6 @@ object FloatingOverlayManager {
         } catch (_: Exception) {}
     }
 
-    /**
-     * Resizes the bottom sheet height dynamically by dragging the top edge handle.
-     * Dragging up increases height, dragging down decreases height.
-     */
     @SuppressLint("ClickableViewAccessibility")
     private fun setupBottomSheetHeightResizeListener(
         context: Context,
@@ -1503,7 +1489,7 @@ object FloatingOverlayManager {
         var startY = 0f
         var startHeight = 0
         val dm = context.resources.displayMetrics
-        val minHeight = dpToPx(context, 170)
+        val minHeight = dpToPx(context, 180)
         val maxHeight = (dm.heightPixels * 0.90f).toInt()
 
         handle.setOnTouchListener { _, event ->
@@ -1566,6 +1552,16 @@ object FloatingOverlayManager {
         }
     }
 
+    /**
+     * 100% natural, intuitive drag listener.
+     * On touch down, converts the window layout parameters to Gravity.TOP or Gravity.START
+     * with the current exact screen coordinate.
+     * When dragging:
+     * - Drag left: moves left
+     * - Drag right: moves right
+     * - Drag up: moves up
+     * - Drag down: moves down
+     */
     @SuppressLint("ClickableViewAccessibility")
     private fun setupDraggableTouchListener(
         context: Context,
@@ -1581,11 +1577,21 @@ object FloatingOverlayManager {
         view.setOnTouchListener { v, event ->
             when (event.action) {
                 MotionEvent.ACTION_DOWN -> {
-                    initialX = wmParams.x
-                    initialY = wmParams.y
+                    val loc = IntArray(2)
+                    overlayRootView?.getLocationOnScreen(loc)
+                    initialX = loc[0]
+                    initialY = loc[1]
                     initialTouchX = event.rawX
                     initialTouchY = event.rawY
                     isClick = true
+
+                    // Convert to absolute TOP|START coordinate system so drag is strictly 1:1 and natural
+                    wmParams.gravity = Gravity.TOP or Gravity.START
+                    wmParams.x = initialX
+                    wmParams.y = initialY
+                    try {
+                        windowManager?.updateViewLayout(overlayRootView, wmParams)
+                    } catch (_: Exception) {}
                     true
                 }
                 MotionEvent.ACTION_MOVE -> {
@@ -1595,17 +1601,13 @@ object FloatingOverlayManager {
                     if (Math.abs(dx) > dpToPx(context, 4) || Math.abs(dy) > dpToPx(context, 4)) {
                         isClick = false
 
-                        if (currentVersion == InterfaceVersion.SIDE_VERTICAL_CARDS && dx > dpToPx(context, 90)) {
-                            dockToEdge(context)
-                            return@setOnTouchListener true
-                        }
+                        val dm = context.resources.displayMetrics
+                        val maxX = (dm.widthPixels - dpToPx(context, 40)).coerceAtLeast(0)
+                        val maxY = (dm.heightPixels - dpToPx(context, 40)).coerceAtLeast(0)
 
-                        if (wmParams.gravity and Gravity.END != 0) {
-                            wmParams.x = (initialX - dx).coerceAtLeast(0)
-                        } else {
-                            wmParams.x = (initialX + dx).coerceAtLeast(0)
-                        }
-                        wmParams.y = (initialY + dy).coerceAtLeast(0)
+                        // Natural movement: dx added to x, dy added to y
+                        wmParams.x = (initialX + dx).coerceIn(0, maxX)
+                        wmParams.y = (initialY + dy).coerceIn(0, maxY)
 
                         try {
                             windowManager?.updateViewLayout(overlayRootView, wmParams)
@@ -1653,7 +1655,7 @@ object FloatingOverlayManager {
     private fun dpToPx(context: Context, dp: Int): Int = dpToPx(context, dp.toFloat())
 
     /**
-     * Bridge class receiving extracted image URLs from JavaScript
+     * Bridge receiving image URLs extracted from Google Search DOM
      */
     class ImageExtractorBridge(private val onExtracted: (List<String>) -> Unit) {
         @JavascriptInterface
