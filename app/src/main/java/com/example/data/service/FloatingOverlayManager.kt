@@ -25,6 +25,7 @@ import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.webkit.JavascriptInterface
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
@@ -832,61 +833,7 @@ object FloatingOverlayManager {
         }
         webContainer = webBox
 
-        val wv = WebView(context).apply {
-            setBackgroundColor(Color.parseColor("#161922"))
-            isVerticalScrollBarEnabled = true
-            isHorizontalScrollBarEnabled = false
-
-            settings.apply {
-                javaScriptEnabled = true
-                domStorageEnabled = true
-                databaseEnabled = true
-                loadWithOverviewMode = true
-                useWideViewPort = true
-                loadsImagesAutomatically = true
-                cacheMode = WebSettings.LOAD_DEFAULT
-                userAgentString = "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
-            }
-
-            addJavascriptInterface(ImageExtractorBridge { urls ->
-                handleExtractedImages(context, urls)
-            }, "ImageExtractor")
-
-            webChromeClient = object : WebChromeClient() {
-                override fun onProgressChanged(view: WebView?, newProgress: Int) {
-                    if (newProgress in 1..99) {
-                        progressBar?.visibility = View.VISIBLE
-                        progressBar?.progress = newProgress
-                    } else {
-                        progressBar?.visibility = View.GONE
-                    }
-                }
-            }
-
-            webViewClient = object : WebViewClient() {
-                override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
-                    progressBar?.visibility = View.VISIBLE
-                }
-
-                override fun onPageFinished(view: WebView?, url: String?) {
-                    progressBar?.visibility = View.GONE
-                    // Trigger high-resolution image extraction
-                    view?.evaluateJavascript(JS_IMAGE_EXTRACTION_SCRIPT, null)
-                    Handler(Looper.getMainLooper()).postDelayed({
-                        view?.evaluateJavascript(JS_IMAGE_EXTRACTION_SCRIPT, null)
-                    }, 600)
-                }
-
-                override fun onReceivedError(view: WebView?, errorCode: Int, description: String?, failingUrl: String?) {
-                    Log.e(TAG, "WebView error: $errorCode $description on $failingUrl")
-                    progressBar?.visibility = View.GONE
-                }
-
-                override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
-                    return false
-                }
-            }
-        }
+        val wv = createConfiguredWebView(context)
         webBox.addView(wv, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         webView = wv
 
@@ -1375,6 +1322,126 @@ object FloatingOverlayManager {
         }
     }
 
+    private fun createConfiguredWebView(context: Context): WebView {
+        return WebView(context).apply {
+            setBackgroundColor(Color.parseColor("#161922"))
+            isVerticalScrollBarEnabled = true
+            isHorizontalScrollBarEnabled = false
+
+            settings.apply {
+                javaScriptEnabled = true
+                domStorageEnabled = true
+                databaseEnabled = true
+                loadWithOverviewMode = true
+                useWideViewPort = true
+                loadsImagesAutomatically = true
+                cacheMode = WebSettings.LOAD_DEFAULT
+                userAgentString = "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
+                mediaPlaybackRequiresUserGesture = false
+            }
+
+            addJavascriptInterface(ImageExtractorBridge { urls ->
+                handleExtractedImages(context, urls)
+            }, "ImageExtractor")
+
+            webChromeClient = object : WebChromeClient() {
+                override fun onProgressChanged(view: WebView?, newProgress: Int) {
+                    if (newProgress in 1..99) {
+                        progressBar?.visibility = View.VISIBLE
+                        progressBar?.progress = newProgress
+                    } else {
+                        progressBar?.visibility = View.GONE
+                    }
+                    overlayRootView?.postInvalidate()
+                }
+            }
+
+            webViewClient = object : WebViewClient() {
+                override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+                    progressBar?.visibility = View.VISIBLE
+                    triggerSurfacePump()
+                }
+
+                override fun onPageFinished(view: WebView?, url: String?) {
+                    progressBar?.visibility = View.GONE
+                    triggerSurfacePump()
+                    // Extract high-resolution images
+                    view?.evaluateJavascript(JS_IMAGE_EXTRACTION_SCRIPT, null)
+                    Handler(Looper.getMainLooper()).postDelayed({
+                        view?.evaluateJavascript(JS_IMAGE_EXTRACTION_SCRIPT, null)
+                    }, 500)
+                }
+
+                override fun onReceivedError(view: WebView?, errorCode: Int, description: String?, failingUrl: String?) {
+                    Log.e(TAG, "WebView error: $errorCode $description on $failingUrl")
+                    progressBar?.visibility = View.GONE
+                }
+
+                override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean {
+                    Log.w(TAG, "WebView render process gone. Rebuilding WebView cleanly...")
+                    recreateWebViewCleanly()
+                    return true
+                }
+
+                override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
+                    return false
+                }
+            }
+
+            onResume()
+            resumeTimers()
+        }
+    }
+
+    private fun recreateWebViewCleanly() {
+        val context = overlayRootView?.context ?: lastContext ?: return
+        val container = webContainer ?: return
+        runOnMainThread {
+            try {
+                webView?.let { oldWv ->
+                    container.removeView(oldWv)
+                    oldWv.destroy()
+                }
+            } catch (_: Exception) {}
+
+            try {
+                val newWv = createConfiguredWebView(context)
+                container.addView(newWv, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+                webView = newWv
+                if (lastLoadedUrl.isNotBlank()) {
+                    newWv.loadUrl(lastLoadedUrl)
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error recreating WebView cleanly", e)
+            }
+        }
+    }
+
+    private var isPumpingSurface = false
+    private fun triggerSurfacePump() {
+        if (isPumpingSurface) return
+        isPumpingSurface = true
+        val handler = Handler(Looper.getMainLooper())
+        var count = 0
+        val runnable = object : Runnable {
+            override fun run() {
+                if (overlayRootView == null || count > 15) {
+                    isPumpingSurface = false
+                    return
+                }
+                count++
+                overlayRootView?.postInvalidate()
+                webView?.postInvalidate()
+                if (progressBar?.visibility == View.VISIBLE) {
+                    handler.postDelayed(this, 120)
+                } else {
+                    isPumpingSurface = false
+                }
+            }
+        }
+        handler.post(runnable)
+    }
+
     private fun loadSearchQuery(query: String, force: Boolean = false) {
         val encoded = URLEncoder.encode(query, StandardCharsets.UTF_8.toString())
         val searchUrl = "https://www.google.com/search?tbm=isch&q=$encoded"
@@ -1389,9 +1456,11 @@ object FloatingOverlayManager {
         photosLoadingBadge?.text = " • Buscando..."
 
         webView?.let { wv ->
-            wv.stopLoading()
+            wv.onResume()
+            wv.resumeTimers()
             wv.loadUrl(searchUrl)
         }
+        triggerSurfacePump()
     }
 
     private fun dockToEdge(context: Context) {

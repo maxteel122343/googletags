@@ -89,8 +89,8 @@ object CreatorDetectionBus {
             } else {
                 cleanNick
             }
-            // Force immediate reload of the search query and webview
-            FloatingOverlayManager.updateQuery(query, forceReload = true)
+            // Update query smoothly without cancelling current search if query is identical
+            FloatingOverlayManager.updateQuery(query, forceReload = false)
         }
     }
 

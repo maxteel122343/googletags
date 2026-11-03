@@ -346,6 +346,15 @@ class CreatorDetectorAccessibilityService : AccessibilityService() {
     ): String? {
         if (node == null || depth > 16 || nodeCount > 150) return null
 
+        val resName = node.viewIdResourceName
+        if (!resName.isNullOrBlank() && (resName.contains("author") || resName.contains("user_name") || resName.contains("profile_name") || resName.contains("channel_name"))) {
+            val raw = node.text?.toString() ?: node.contentDescription?.toString()
+            if (!raw.isNullOrBlank()) {
+                val clean = sanitizeNickname(raw)
+                if (isValidUsername(clean)) return clean
+            }
+        }
+
         val text = node.text?.toString()
         if (!text.isNullOrBlank()) {
             val atMatch = USERNAME_AT_REGEX.find(text)
