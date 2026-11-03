@@ -1,0 +1,6 @@
+{
+  "name": "FeedLens",
+  "description": "Feed vertical com detecção de criador e busca inteligente no Google em 5 versões de interface.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
