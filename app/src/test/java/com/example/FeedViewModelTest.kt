@@ -43,6 +43,12 @@ class FeedViewModelTest {
 
         viewModel.setInterfaceVersion(InterfaceVersion.BOTTOM_SHEET)
         assertEquals(InterfaceVersion.BOTTOM_SHEET, viewModel.uiState.value.activeInterfaceVersion)
+
+        viewModel.setInterfaceVersion(InterfaceVersion.EXTRACTED_IMAGES_SCROLL)
+        assertEquals(InterfaceVersion.EXTRACTED_IMAGES_SCROLL, viewModel.uiState.value.activeInterfaceVersion)
+
+        viewModel.setInterfaceVersion(InterfaceVersion.CAROUSEL_PHOTO_CARDS)
+        assertEquals(InterfaceVersion.CAROUSEL_PHOTO_CARDS, viewModel.uiState.value.activeInterfaceVersion)
     }
 
     @Test

@@ -4,6 +4,8 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
 import android.content.res.ColorStateList
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.drawable.GradientDrawable
@@ -12,6 +14,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
+import android.util.Base64
 import android.util.Log
 import android.util.TypedValue
 import android.view.Gravity
@@ -22,6 +25,7 @@ import android.view.ViewGroup
 import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
+import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
@@ -30,10 +34,15 @@ import android.webkit.WebViewClient
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
+import coil.ImageLoader
+import coil.request.ImageRequest
 import com.example.data.model.InterfaceVersion
+import com.example.data.repository.CreatorRepository
+import org.json.JSONArray
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
 
@@ -41,17 +50,72 @@ import java.nio.charset.StandardCharsets
  * Manages the real system WindowManager floating overlay over TikTok, Instagram,
  * YouTube Shorts, or any third-party app.
  *
- * Supports:
- * - 5 layout paradigms: V1 (Bottom Bar), V2 (Sidebar), V3 (Popup Card), V4 (50% Split), V5 (Bottom Sheet)
- * - Clean lifecycle recreation when switching versions without black screens or frozen renderers
- * - Sidebar drag-to-edge hide, edge resize handle, and edge tab restore
- * - Real EditText search bar with dynamic WindowManager focus & soft keyboard management
- * - Dynamic '+' tag adder with inline tag creation
- * - Live Google Search / Images WebView with automatic query reloading
+ * Supports 7 interface versions:
+ * - V1: Bottom Horizontal Cards (Reels style bar)
+ * - V2: Sidebar Vertical Cards (Split screen right edge with resize & dock)
+ * - V3: Compact Floating Card (Popup card)
+ * - V4: Full Split Screen 50/50 (Google Dark Search)
+ * - V5: Bottom Sheet (Resizable height via top drag handle)
+ * - V6: Bottom Sheet with JavaScript Extracted Google Images Horizontal Scroll
+ * - V7: Horizontal Photo Cards Carousel with Extracted Google Images
+ *
+ * Features:
+ * - Instant query reload on TikTok/Instagram feed scroll detection
+ * - Top-edge draggable height resize for Bottom Sheet (V5 & V6)
+ * - Headless/Live JavaScript image extraction from Google Search DOM
+ * - Smooth state preservation across versions and scroll changes
  */
 object FloatingOverlayManager {
 
     private const val TAG = "FeedLensOverlay"
+
+    private const val JS_IMAGE_EXTRACTION_SCRIPT = """
+        (function() {
+            try {
+                var found = [];
+                var seen = {};
+
+                function addUrl(u) {
+                    if (!u || typeof u !== 'string') return;
+                    u = u.trim();
+                    if (u.length < 12) return;
+                    if (u.indexOf('data:image/svg') === 0) return;
+                    if (u.indexOf('googlelogo') !== -1 || u.indexOf('cleardot.gif') !== -1 || u.indexOf('favicon') !== -1) return;
+                    if (!seen[u]) {
+                        seen[u] = true;
+                        found.push(u);
+                    }
+                }
+
+                var imgs = document.querySelectorAll('img');
+                for (var i = 0; i < imgs.length; i++) {
+                    var el = imgs[i];
+                    addUrl(el.getAttribute('data-src'));
+                    addUrl(el.getAttribute('data-iurl'));
+                    addUrl(el.src);
+                }
+
+                var links = document.querySelectorAll('a[href*="imgurl="]');
+                for (var j = 0; j < links.length; j++) {
+                    var href = links[j].href;
+                    var match = href.match(/imgurl=([^&]+)/);
+                    if (match && match[1]) {
+                        try {
+                            addUrl(decodeURIComponent(match[1]));
+                        } catch(e) {}
+                    }
+                }
+
+                var resultJson = JSON.stringify(found.slice(0, 30));
+                if (window.ImageExtractor && window.ImageExtractor.onImagesExtracted) {
+                    window.ImageExtractor.onImagesExtracted(resultJson);
+                }
+                return resultJson;
+            } catch(err) {
+                return JSON.stringify([]);
+            }
+        })();
+    """
 
     private var windowManager: WindowManager? = null
     private var overlayRootView: View? = null
@@ -68,11 +132,20 @@ object FloatingOverlayManager {
     private var newTagEditText: EditText? = null
     private var dockedEdgeTab: LinearLayout? = null
 
+    // For V6 and V7 extracted images
+    private var extractedImagesScrollContainer: HorizontalScrollView? = null
+    private var extractedImagesRow: LinearLayout? = null
+    private var extractedLoadingText: TextView? = null
+
     private var currentVersion = InterfaceVersion.SIDE_VERTICAL_CARDS
     private var currentQuery = "ju.pasqualotto fotos"
     private var lastLoadedUrl = ""
     private var isSidebarDocked = false
     private var sidebarWidthPx = 0
+    private var bottomSheetHeightPx = 0
+
+    // Cached extracted images
+    private val extractedImageUrls = mutableListOf<String>()
 
     fun isShowing(): Boolean = overlayRootView != null
 
@@ -101,7 +174,7 @@ object FloatingOverlayManager {
 
         if (overlayRootView != null) {
             switchInterfaceVersion(version)
-            updateQuery(initialQuery)
+            updateQuery(initialQuery, forceReload = true)
             return
         }
 
@@ -158,7 +231,7 @@ object FloatingOverlayManager {
     /**
      * Completely destroys the current overlay view hierarchy and WebView,
      * removes from WindowManager, and recreates cleanly for the new InterfaceVersion.
-     * Guarantees no black screen or zombie renderer state.
+     * Preserves search query and extracted photos seamlessly.
      */
     fun switchInterfaceVersion(newVersion: InterfaceVersion) {
         runOnMainThread {
@@ -218,7 +291,7 @@ object FloatingOverlayManager {
                 CreatorDetectionBus.setOverlayShowing(true)
                 Log.d(TAG, "switchInterfaceVersion: successfully added new overlay for $newVersion")
 
-                // 6. Force reload the search query into the newly created WebView
+                // 6. Force reload search query
                 loadSearchQuery(queryToRetain, force = true)
             } catch (e: Exception) {
                 Log.e(TAG, "switchInterfaceVersion failed", e)
@@ -269,6 +342,9 @@ object FloatingOverlayManager {
         chipsRowLayout = null
         progressBar = null
         loadingContainer = null
+        extractedImagesScrollContainer = null
+        extractedImagesRow = null
+        extractedLoadingText = null
         currentWmParams = null
     }
 
@@ -321,13 +397,37 @@ object FloatingOverlayManager {
                 wmParams.height = screenH
             }
 
-            // V5: Bottom Sheet
+            // V5: Bottom Sheet (Google Search / Imagens)
             InterfaceVersion.BOTTOM_SHEET -> {
                 wmParams.gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
                 wmParams.x = 0
                 wmParams.y = 0
                 wmParams.width = screenW
-                wmParams.height = (screenH * 0.52f).toInt()
+                if (bottomSheetHeightPx <= 0) {
+                    bottomSheetHeightPx = (screenH * 0.52f).toInt()
+                }
+                wmParams.height = bottomSheetHeightPx
+            }
+
+            // V6: Bottom Sheet with JavaScript Extracted Google Images Horizontal Scroll
+            InterfaceVersion.EXTRACTED_IMAGES_SCROLL -> {
+                wmParams.gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+                wmParams.x = 0
+                wmParams.y = 0
+                wmParams.width = screenW
+                if (bottomSheetHeightPx <= 0) {
+                    bottomSheetHeightPx = (screenH * 0.46f).toInt()
+                }
+                wmParams.height = bottomSheetHeightPx
+            }
+
+            // V7: Horizontal Photo Cards Carousel with Extracted Google Images
+            InterfaceVersion.CAROUSEL_PHOTO_CARDS -> {
+                wmParams.gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+                wmParams.x = 0
+                wmParams.y = dpToPx(context, 8)
+                wmParams.width = (screenW * 0.96f).toInt()
+                wmParams.height = dpToPx(context, 320)
             }
         }
     }
@@ -395,14 +495,18 @@ object FloatingOverlayManager {
 
         // 2. MAIN CONTAINER
         val isHorizontal = currentVersion == InterfaceVersion.SIDE_VERTICAL_CARDS || currentVersion == InterfaceVersion.FULL_SPLIT_SCREEN
+        val isBottomSheetType = currentVersion == InterfaceVersion.BOTTOM_SHEET || currentVersion == InterfaceVersion.EXTRACTED_IMAGES_SCROLL
         val mainLayout = LinearLayout(context).apply {
             orientation = if (isHorizontal) LinearLayout.HORIZONTAL else LinearLayout.VERTICAL
             val bg = GradientDrawable().apply {
                 setColor(Color.parseColor("#FA12141A"))
-                cornerRadius = if (currentVersion == InterfaceVersion.BOTTOM_SHEET || currentVersion == InterfaceVersion.FULL_SPLIT_SCREEN)
-                    dpToPx(context, 12).toFloat()
-                else
+                cornerRadius = if (isBottomSheetType) {
                     dpToPx(context, 18).toFloat()
+                } else if (currentVersion == InterfaceVersion.FULL_SPLIT_SCREEN) {
+                    dpToPx(context, 8).toFloat()
+                } else {
+                    dpToPx(context, 18).toFloat()
+                }
                 setStroke(dpToPx(context, 1), Color.parseColor("#383E4E"))
             }
             background = bg
@@ -452,23 +556,39 @@ object FloatingOverlayManager {
         }
 
         // TOP BAR: Drag Handle Pill
+        // For V5 and V6, this handle resizes the bottom sheet height dynamically!
+        val dragHandleContainer = FrameLayout(context).apply {
+            setPadding(0, dpToPx(context, 4), 0, dpToPx(context, 6))
+        }
         val dragHandle = View(context).apply {
             val handleDrawable = GradientDrawable().apply {
-                setColor(Color.parseColor("#668AB4F8"))
+                setColor(if (isBottomSheetType) Color.parseColor("#8AB4F8") else Color.parseColor("#668AB4F8"))
                 cornerRadius = dpToPx(context, 3).toFloat()
             }
             background = handleDrawable
         }
-        val dragHandleLp = LinearLayout.LayoutParams(
-            dpToPx(context, 38),
+        val dragHandleLp = FrameLayout.LayoutParams(
+            dpToPx(context, if (isBottomSheetType) 48 else 38),
             dpToPx(context, 4)
         ).apply {
-            gravity = Gravity.CENTER_HORIZONTAL
-            setMargins(0, 0, 0, dpToPx(context, 6))
+            gravity = Gravity.CENTER
         }
-        contentColumn.addView(dragHandle, dragHandleLp)
+        dragHandleContainer.addView(dragHandle, dragHandleLp)
 
-        // HEADER: Mode Pills (V1..V5) + Browser Icon + Dock Icon + Close Icon
+        val dragContainerLp = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        )
+        contentColumn.addView(dragHandleContainer, dragContainerLp)
+
+        // Setup top drag handle listener
+        if (isBottomSheetType) {
+            setupBottomSheetHeightResizeListener(context, dragHandleContainer, wmParams)
+        } else {
+            setupDraggableTouchListener(context, dragHandleContainer, wmParams)
+        }
+
+        // HEADER: Mode Pills (V1..V7) + Browser Icon + Dock Icon + Close Icon
         val headerRow = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -495,6 +615,8 @@ object FloatingOverlayManager {
                 InterfaceVersion.COMPACT_FLOATING_CARD -> "V3"
                 InterfaceVersion.FULL_SPLIT_SCREEN -> "V4"
                 InterfaceVersion.BOTTOM_SHEET -> "V5"
+                InterfaceVersion.EXTRACTED_IMAGES_SCROLL -> "V6"
+                InterfaceVersion.CAROUSEL_PHOTO_CARDS -> "V7"
             }
             val pill = TextView(context).apply {
                 text = verLabel
@@ -613,7 +735,7 @@ object FloatingOverlayManager {
                 ) {
                     val newQ = text.toString().trim()
                     if (newQ.isNotBlank()) {
-                        updateQuery(newQ)
+                        updateQuery(newQ, forceReload = true)
                     }
                     disableInputFocus(this)
                     true
@@ -633,7 +755,7 @@ object FloatingOverlayManager {
             setOnClickListener {
                 val q = editSearch.text.toString().trim()
                 if (q.isNotBlank()) {
-                    updateQuery(q)
+                    updateQuery(q, forceReload = true)
                 }
                 disableInputFocus(editSearch)
             }
@@ -752,7 +874,32 @@ object FloatingOverlayManager {
         progressBar = pBar
         contentColumn.addView(pBar, pBarLp)
 
-        // WEB CONTAINER (Contains WebView + Loading state indicator)
+        // CONTENT DISPLAY (WebView vs V6/V7 extracted images)
+        if (currentVersion == InterfaceVersion.EXTRACTED_IMAGES_SCROLL || currentVersion == InterfaceVersion.CAROUSEL_PHOTO_CARDS) {
+            // V6 & V7: Render Horizontal Images Display
+            buildExtractedImagesDisplay(context, contentColumn)
+            // Headless/minimal WebView in background to extract images
+            buildHeadlessWebView(context, contentColumn)
+        } else {
+            // V1..V5: Direct Interactive Google WebView
+            buildInteractiveWebContainer(context, contentColumn)
+        }
+
+        mainLayout.addView(contentColumn, contentLp)
+
+        val mainLp = FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT
+        )
+        root.addView(mainLayout, mainLp)
+
+        // Setup drag listener for header if not bottom sheet
+        if (!isBottomSheetType) {
+            setupDraggableTouchListener(context, headerRow, wmParams)
+        }
+    }
+
+    private fun buildInteractiveWebContainer(context: Context, parent: LinearLayout) {
         val webContainer = FrameLayout(context).apply {
             val wvDrawable = GradientDrawable().apply {
                 setColor(Color.parseColor("#12141A"))
@@ -762,7 +909,6 @@ object FloatingOverlayManager {
             clipToOutline = true
         }
 
-        // REAL INTERACTIVE WEBVIEW
         val wv = WebView(context).apply {
             setBackgroundColor(Color.TRANSPARENT)
             isVerticalScrollBarEnabled = true
@@ -793,7 +939,7 @@ object FloatingOverlayManager {
             }
 
             webViewClient = object : WebViewClient() {
-                override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                     Log.d(TAG, "WebView onPageStarted: $url")
                     progressBar?.visibility = View.VISIBLE
                     loadingContainer?.visibility = View.VISIBLE
@@ -856,19 +1002,314 @@ object FloatingOverlayManager {
             0,
             1f
         )
-        contentColumn.addView(webContainer, webContainerLp)
+        parent.addView(webContainer, webContainerLp)
+    }
 
-        mainLayout.addView(contentColumn, contentLp)
+    private fun buildHeadlessWebView(context: Context, parent: LinearLayout) {
+        val wv = WebView(context).apply {
+            setBackgroundColor(Color.TRANSPARENT)
+            settings.apply {
+                javaScriptEnabled = true
+                domStorageEnabled = true
+                loadWithOverviewMode = true
+                useWideViewPort = true
+                cacheMode = WebSettings.LOAD_DEFAULT
+                userAgentString = "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
+            }
 
-        val mainLp = FrameLayout.LayoutParams(
+            addJavascriptInterface(ImageExtractorBridge { urls ->
+                handleExtractedImages(context, urls)
+            }, "ImageExtractor")
+
+            webChromeClient = object : WebChromeClient() {
+                override fun onProgressChanged(view: WebView?, newProgress: Int) {
+                    if (newProgress in 1..99) {
+                        progressBar?.visibility = View.VISIBLE
+                        progressBar?.progress = newProgress
+                    } else {
+                        progressBar?.visibility = View.GONE
+                    }
+                }
+            }
+
+            webViewClient = object : WebViewClient() {
+                override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+                    progressBar?.visibility = View.VISIBLE
+                    extractedLoadingText?.visibility = View.VISIBLE
+                }
+
+                override fun onPageFinished(view: WebView?, url: String?) {
+                    progressBar?.visibility = View.GONE
+                    // Trigger extraction immediately and again after 800ms for lazy images
+                    view?.evaluateJavascript(JS_IMAGE_EXTRACTION_SCRIPT, null)
+                    Handler(Looper.getMainLooper()).postDelayed({
+                        view?.evaluateJavascript(JS_IMAGE_EXTRACTION_SCRIPT, null)
+                    }, 800)
+                }
+            }
+        }
+        // Minimal 1dp view so WebKit processes layout and loads DOM images
+        val wvLp = LinearLayout.LayoutParams(1, 1)
+        parent.addView(wv, wvLp)
+        webView = wv
+    }
+
+    private fun buildExtractedImagesDisplay(context: Context, parent: LinearLayout) {
+        val isCarousel = currentVersion == InterfaceVersion.CAROUSEL_PHOTO_CARDS
+
+        // Subtitle badge
+        val infoRow = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, 0, 0, dpToPx(context, 6))
+        }
+        val infoBadge = TextView(context).apply {
+            text = if (isCarousel) "📸 V7: CARROSSEL DE FOTOS (GOOGLE)" else "🖼️ V6: FOTOS EXTRAÍDAS (GOOGLE)"
+            setTextColor(Color.parseColor("#8AB4F8"))
+            textSize = 10.5f
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+        }
+        infoRow.addView(infoBadge)
+
+        val loadStatus = TextView(context).apply {
+            text = " • Carregando..."
+            setTextColor(Color.parseColor("#9AA0A6"))
+            textSize = 10.5f
+        }
+        extractedLoadingText = loadStatus
+        infoRow.addView(loadStatus)
+
+        parent.addView(infoRow)
+
+        // Horizontal scroll container
+        val scroll = HorizontalScrollView(context).apply {
+            isHorizontalScrollBarEnabled = true
+            isFillViewport = true
+        }
+        extractedImagesScrollContainer = scroll
+
+        val row = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        extractedImagesRow = row
+
+        scroll.addView(row)
+
+        val scrollLp = LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.MATCH_PARENT
+            0,
+            1f
         )
-        root.addView(mainLayout, mainLp)
+        parent.addView(scroll, scrollLp)
 
-        // Setup touch dragging
-        setupDraggableTouchListener(context, dragHandle, wmParams)
-        setupDraggableTouchListener(context, headerRow, wmParams)
+        // Populate with already cached images or initial fallback items
+        populateExtractedImagesUi(context)
+    }
+
+    private fun handleExtractedImages(context: Context, urls: List<String>) {
+        runOnMainThread {
+            if (urls.isNotEmpty()) {
+                extractedImageUrls.clear()
+                extractedImageUrls.addAll(urls)
+                extractedLoadingText?.text = " • ${urls.size} fotos encontradas"
+                populateExtractedImagesUi(context)
+            }
+        }
+    }
+
+    private fun populateExtractedImagesUi(context: Context) {
+        val row = extractedImagesRow ?: return
+        row.removeAllViews()
+
+        val isCarousel = currentVersion == InterfaceVersion.CAROUSEL_PHOTO_CARDS
+        val nick = CreatorDetectionBus.latestDetectedNickname.value ?: currentQuery.split(" ").firstOrNull() ?: "criador"
+        val activeKw = CreatorDetectionBus.activeSearchKeyword.value
+
+        // If no images extracted yet, provide sample video images from CreatorRepository as instant preview
+        val imagesToDisplay: List<String> = if (extractedImageUrls.isNotEmpty()) {
+            extractedImageUrls
+        } else {
+            val sample = CreatorRepository.sampleVideos.find { it.nickname.contains(nick, ignoreCase = true) }
+                ?: CreatorRepository.sampleVideos.first()
+            sample.imageResults.map { it.assetFileName ?: it.title }
+        }
+
+        imagesToDisplay.forEachIndexed { index, imgItem ->
+            if (isCarousel) {
+                // V7: Styled Carousel Card
+                val card = LinearLayout(context).apply {
+                    orientation = LinearLayout.VERTICAL
+                    val cardBg = GradientDrawable().apply {
+                        setColor(Color.parseColor("#1C202C"))
+                        cornerRadius = dpToPx(context, 12).toFloat()
+                        setStroke(dpToPx(context, 1), Color.parseColor("#343B4D"))
+                    }
+                    background = cardBg
+                    elevation = dpToPx(context, 6).toFloat()
+                    clipToOutline = true
+                    setOnClickListener {
+                        openExternalSearch(context, "$nick $activeKw")
+                    }
+                }
+                val cardLp = LinearLayout.LayoutParams(
+                    dpToPx(context, 140),
+                    dpToPx(context, 185)
+                ).apply {
+                    setMargins(0, 0, dpToPx(context, 10), 0)
+                }
+
+                // Image inside Card
+                val iv = ImageView(context).apply {
+                    scaleType = ImageView.ScaleType.CENTER_CROP
+                }
+                loadImageItem(context, imgItem, iv)
+
+                val ivLp = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    dpToPx(context, 120)
+                )
+                card.addView(iv, ivLp)
+
+                // Info footer
+                val footer = LinearLayout(context).apply {
+                    orientation = LinearLayout.VERTICAL
+                    setPadding(dpToPx(context, 8), dpToPx(context, 6), dpToPx(context, 8), dpToPx(context, 6))
+                }
+                val userTag = TextView(context).apply {
+                    text = "@$nick"
+                    setTextColor(Color.WHITE)
+                    textSize = 10.5f
+                    typeface = android.graphics.Typeface.DEFAULT_BOLD
+                    maxLines = 1
+                }
+                footer.addView(userTag)
+
+                val tagRow = LinearLayout(context).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                }
+                val badge = TextView(context).apply {
+                    text = "#$activeKw"
+                    setTextColor(Color.parseColor("#8AB4F8"))
+                    textSize = 9.5f
+                }
+                tagRow.addView(badge)
+
+                val openIco = TextView(context).apply {
+                    text = "  ↗"
+                    setTextColor(Color.parseColor("#81C995"))
+                    textSize = 10f
+                    typeface = android.graphics.Typeface.DEFAULT_BOLD
+                }
+                tagRow.addView(openIco)
+
+                footer.addView(tagRow)
+                card.addView(footer)
+                row.addView(card, cardLp)
+
+            } else {
+                // V6: Streamlined Horizontal Scroll Image Thumbnails
+                val imgFrame = FrameLayout(context).apply {
+                    val frameBg = GradientDrawable().apply {
+                        setColor(Color.parseColor("#1B1F2A"))
+                        cornerRadius = dpToPx(context, 10).toFloat()
+                        setStroke(dpToPx(context, 1), Color.parseColor("#333A4B"))
+                    }
+                    background = frameBg
+                    clipToOutline = true
+                    setOnClickListener {
+                        openExternalSearch(context, "$nick $activeKw")
+                    }
+                }
+                val frameLp = LinearLayout.LayoutParams(
+                    dpToPx(context, 110),
+                    dpToPx(context, 140)
+                ).apply {
+                    setMargins(0, 0, dpToPx(context, 8), 0)
+                }
+
+                val iv = ImageView(context).apply {
+                    scaleType = ImageView.ScaleType.CENTER_CROP
+                }
+                loadImageItem(context, imgItem, iv)
+
+                val ivLp = FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT
+                )
+                imgFrame.addView(iv, ivLp)
+
+                val numBadge = TextView(context).apply {
+                    text = "${index + 1}"
+                    setTextColor(Color.WHITE)
+                    textSize = 9f
+                    typeface = android.graphics.Typeface.DEFAULT_BOLD
+                    val nBg = GradientDrawable().apply {
+                        setColor(Color.parseColor("#CC000000"))
+                        cornerRadius = dpToPx(context, 4).toFloat()
+                    }
+                    background = nBg
+                    setPadding(dpToPx(context, 4), dpToPx(context, 1), dpToPx(context, 4), dpToPx(context, 1))
+                }
+                val numLp = FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    Gravity.TOP or Gravity.START
+                ).apply {
+                    setMargins(dpToPx(context, 4), dpToPx(context, 4), 0, 0)
+                }
+                imgFrame.addView(numBadge, numLp)
+
+                row.addView(imgFrame, frameLp)
+            }
+        }
+    }
+
+    private fun loadImageItem(context: Context, source: String, imageView: ImageView) {
+        if (source.startsWith("data:image/")) {
+            try {
+                val base64Data = source.substringAfter("base64,")
+                val decodedBytes = Base64.decode(base64Data, Base64.DEFAULT)
+                val bitmap = BitmapFactory.decodeByteArray(decodedBytes, 0, decodedBytes.size)
+                if (bitmap != null) {
+                    imageView.setImageBitmap(bitmap)
+                    return
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed base64 decode", e)
+            }
+        }
+
+        if (source.startsWith("http://") || source.startsWith("https://")) {
+            try {
+                val imageLoader = ImageLoader(context)
+                val request = ImageRequest.Builder(context)
+                    .data(source)
+                    .target(imageView)
+                    .crossfade(true)
+                    .build()
+                imageLoader.enqueue(request)
+                return
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed Coil image load", e)
+            }
+        }
+
+        // Fallback to local asset
+        val assetName = if (source.endsWith(".png") || source.endsWith(".jpg")) {
+            source
+        } else {
+            "image_25e5e779.png"
+        }
+        try {
+            context.assets.open(assetName).use { input ->
+                val bm = BitmapFactory.decodeStream(input)
+                imageView.setImageBitmap(bm)
+            }
+        } catch (_: Exception) {
+            imageView.setBackgroundColor(Color.parseColor("#2A3142"))
+        }
     }
 
     private fun renderTagChips(context: Context, row: LinearLayout) {
@@ -893,7 +1334,7 @@ object FloatingOverlayManager {
                 setOnClickListener {
                     val baseNick = CreatorDetectionBus.latestDetectedNickname.value ?: "ju.pasqualotto"
                     CreatorDetectionBus.setActiveKeyword(kw)
-                    updateQuery("$baseNick $kw")
+                    updateQuery("$baseNick $kw", forceReload = true)
                     renderTagChips(context, row)
                 }
             }
@@ -938,7 +1379,7 @@ object FloatingOverlayManager {
         if (tagText.isNotBlank()) {
             CreatorDetectionBus.addKeyword(tagText)
             val baseNick = CreatorDetectionBus.latestDetectedNickname.value ?: "ju.pasqualotto"
-            updateQuery("$baseNick $tagText")
+            updateQuery("$baseNick $tagText", forceReload = true)
             chipsRowLayout?.let { renderTagChips(context, it) }
         }
         newTagEditText?.setText("")
@@ -976,13 +1417,20 @@ object FloatingOverlayManager {
         } catch (_: Exception) {}
     }
 
-    fun updateQuery(newQuery: String) {
+    /**
+     * Updates the active query and forces immediate reload in the Google search engine.
+     */
+    fun updateQuery(newQuery: String, forceReload: Boolean = false) {
         if (newQuery.isBlank()) return
+        val queryChanged = (currentQuery != newQuery)
         currentQuery = newQuery
 
         runOnMainThread {
             searchEditText?.setText(newQuery)
-            loadSearchQuery(newQuery)
+            chipsRowLayout?.let { row ->
+                lastContext?.let { ctx -> renderTagChips(ctx, row) }
+            }
+            loadSearchQuery(newQuery, force = forceReload || queryChanged)
         }
     }
 
@@ -997,7 +1445,14 @@ object FloatingOverlayManager {
         lastLoadedUrl = searchUrl
 
         Log.d(TAG, "loadSearchQuery: loading $searchUrl (force=$force)")
-        webView?.loadUrl(searchUrl)
+        progressBar?.visibility = View.VISIBLE
+        loadingContainer?.visibility = View.VISIBLE
+        extractedLoadingText?.text = " • Buscando no Google..."
+
+        webView?.let { wv ->
+            wv.stopLoading()
+            wv.loadUrl(searchUrl)
+        }
     }
 
     private fun dockToEdge(context: Context) {
@@ -1033,6 +1488,46 @@ object FloatingOverlayManager {
         try {
             wm.updateViewLayout(root, wmParams)
         } catch (_: Exception) {}
+    }
+
+    /**
+     * Resizes the bottom sheet height dynamically by dragging the top edge handle.
+     * Dragging up increases height, dragging down decreases height.
+     */
+    @SuppressLint("ClickableViewAccessibility")
+    private fun setupBottomSheetHeightResizeListener(
+        context: Context,
+        handle: View,
+        wmParams: WindowManager.LayoutParams
+    ) {
+        var startY = 0f
+        var startHeight = 0
+        val dm = context.resources.displayMetrics
+        val minHeight = dpToPx(context, 170)
+        val maxHeight = (dm.heightPixels * 0.90f).toInt()
+
+        handle.setOnTouchListener { _, event ->
+            when (event.action) {
+                MotionEvent.ACTION_DOWN -> {
+                    startY = event.rawY
+                    startHeight = wmParams.height
+                    true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val dy = (startY - event.rawY).toInt()
+                    val newHeight = (startHeight + dy).coerceIn(minHeight, maxHeight)
+                    if (newHeight != wmParams.height) {
+                        wmParams.height = newHeight
+                        bottomSheetHeightPx = newHeight
+                        try {
+                            windowManager?.updateViewLayout(overlayRootView, wmParams)
+                        } catch (_: Exception) {}
+                    }
+                    true
+                }
+                else -> false
+            }
+        }
     }
 
     @SuppressLint("ClickableViewAccessibility")
@@ -1156,4 +1651,26 @@ object FloatingOverlayManager {
     }
 
     private fun dpToPx(context: Context, dp: Int): Int = dpToPx(context, dp.toFloat())
+
+    /**
+     * Bridge class receiving extracted image URLs from JavaScript
+     */
+    class ImageExtractorBridge(private val onExtracted: (List<String>) -> Unit) {
+        @JavascriptInterface
+        fun onImagesExtracted(jsonString: String) {
+            try {
+                val array = JSONArray(jsonString)
+                val list = mutableListOf<String>()
+                for (i in 0 until array.length()) {
+                    val url = array.optString(i)
+                    if (url.isNotBlank()) {
+                        list.add(url)
+                    }
+                }
+                onExtracted(list)
+            } catch (e: Exception) {
+                Log.e(TAG, "ImageExtractorBridge json parse error", e)
+            }
+        }
+    }
 }

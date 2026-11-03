@@ -65,6 +65,8 @@ import com.example.ui.components.Version2SideVerticalCards
 import com.example.ui.components.Version3CompactFloatingCard
 import com.example.ui.components.Version4FullSplitScreen
 import com.example.ui.components.Version5BottomSheet
+import com.example.ui.components.Version6ExtractedImagesScroll
+import com.example.ui.components.Version7CarouselPhotoCards
 import com.example.ui.components.VideoPlayerOverlay
 import com.example.ui.theme.GoogleBlue
 import com.example.ui.theme.TikTokRed
@@ -373,6 +375,92 @@ fun FeedScreen(
                         },
                         onFilterChipClick = { chip ->
                             viewModel.openInBrowser(context, "${uiState.activeSearchQuery} $chip")
+                        },
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .padding(bottom = 54.dp)
+                    )
+                }
+            }
+
+            // VERSION 6: EXTRACTED IMAGES HORIZONTAL SCROLL (Google Photos)
+            InterfaceVersion.EXTRACTED_IMAGES_SCROLL -> {
+                Box(modifier = Modifier.fillMaxSize()) {
+                    VerticalPager(
+                        state = pagerState,
+                        modifier = Modifier.fillMaxSize()
+                    ) { page ->
+                        val video = uiState.videos[page]
+                        VideoPlayerOverlay(
+                            video = video,
+                            isLiked = uiState.likedVideoIds.contains(video.id),
+                            isBookmarked = uiState.bookmarkedVideoIds.contains(video.id),
+                            isFollowing = uiState.followedNicknames.contains(video.nickname),
+                            onLikeClick = { viewModel.toggleLike(video.id) },
+                            onBookmarkClick = { viewModel.toggleBookmark(video.id) },
+                            onFollowClick = { viewModel.toggleFollow(video.nickname) },
+                            onShareClick = {
+                                viewModel.openInBrowser(context, "https://www.google.com/search?q=${video.nickname}")
+                            },
+                            onCommentClick = {
+                                Toast.makeText(context, "${video.commentsCount} comentários", Toast.LENGTH_SHORT).show()
+                            },
+                            contentPaddingBottom = 220
+                        )
+                    }
+
+                    Version6ExtractedImagesScroll(
+                        video = currentVideo,
+                        searchQuery = uiState.activeSearchQuery,
+                        results = uiState.activeImageResults,
+                        onImageClick = { item ->
+                            viewModel.openInBrowser(context, "${item.title} ${uiState.activeSearchQuery}", asImages = true)
+                        },
+                        onSeeAllClick = {
+                            viewModel.openInBrowser(context, uiState.activeSearchQuery, asImages = true)
+                        },
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .padding(bottom = 54.dp)
+                    )
+                }
+            }
+
+            // VERSION 7: CAROUSEL PHOTO CARDS (Google Photos Carousel)
+            InterfaceVersion.CAROUSEL_PHOTO_CARDS -> {
+                Box(modifier = Modifier.fillMaxSize()) {
+                    VerticalPager(
+                        state = pagerState,
+                        modifier = Modifier.fillMaxSize()
+                    ) { page ->
+                        val video = uiState.videos[page]
+                        VideoPlayerOverlay(
+                            video = video,
+                            isLiked = uiState.likedVideoIds.contains(video.id),
+                            isBookmarked = uiState.bookmarkedVideoIds.contains(video.id),
+                            isFollowing = uiState.followedNicknames.contains(video.nickname),
+                            onLikeClick = { viewModel.toggleLike(video.id) },
+                            onBookmarkClick = { viewModel.toggleBookmark(video.id) },
+                            onFollowClick = { viewModel.toggleFollow(video.nickname) },
+                            onShareClick = {
+                                viewModel.openInBrowser(context, "https://www.google.com/search?q=${video.nickname}")
+                            },
+                            onCommentClick = {
+                                Toast.makeText(context, "${video.commentsCount} comentários", Toast.LENGTH_SHORT).show()
+                            },
+                            contentPaddingBottom = 260
+                        )
+                    }
+
+                    Version7CarouselPhotoCards(
+                        video = currentVideo,
+                        searchQuery = uiState.activeSearchQuery,
+                        results = uiState.activeImageResults,
+                        onCardClick = { item ->
+                            viewModel.openInBrowser(context, "${item.title} ${uiState.activeSearchQuery}", asImages = true)
+                        },
+                        onSeeAllClick = {
+                            viewModel.openInBrowser(context, uiState.activeSearchQuery, asImages = true)
                         },
                         modifier = Modifier
                             .align(Alignment.BottomCenter)

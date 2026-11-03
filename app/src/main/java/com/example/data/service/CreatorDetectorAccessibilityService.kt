@@ -47,26 +47,36 @@ class CreatorDetectorAccessibilityService : AccessibilityService() {
         val packageName = event.packageName?.toString() ?: return
         if (!isTargetPackage(packageName)) return
 
-        // Throttle events slightly (80ms) for fast and responsive scroll detection
+        // Throttle events slightly (60ms) for ultra-fast and responsive scroll detection
         val now = System.currentTimeMillis()
-        if (now - lastEventTime < 80) return
+        if (now - lastEventTime < 60) return
         lastEventTime = now
 
-        val root = rootInActiveWindow ?: event.source ?: return
+        // When a system overlay is visible, rootInActiveWindow might point to the overlay (com.example)
+        // or be null. Prioritize the event source corresponding to the target package.
+        val src = event.source
+        val activeRoot = rootInActiveWindow
+        val targetNode: AccessibilityNodeInfo = (if (src != null && src.packageName?.toString() == packageName) src else null)
+            ?: (if (activeRoot != null && activeRoot.packageName?.toString() == packageName) activeRoot else null)
+            ?: src
+            ?: activeRoot
+            ?: return
 
         try {
             val detected = when (packageName) {
-                "com.zhiliaoapp.musically", "com.ss.android.ugc.trill" -> extractTikTokCreator(root)
-                "com.instagram.android" -> extractInstagramCreator(root)
-                "com.google.android.youtube" -> extractYouTubeShortsCreator(root)
+                "com.zhiliaoapp.musically", "com.ss.android.ugc.trill" -> extractTikTokCreator(targetNode)
+                "com.instagram.android" -> extractInstagramCreator(targetNode)
+                "com.google.android.youtube" -> extractYouTubeShortsCreator(targetNode)
                 else -> null
-            } ?: scanRecursivelyForCreator(root, 0)
+            } ?: scanRecursivelyForCreator(targetNode, 0)
 
             if (!detected.isNullOrBlank()) {
                 val cleanNickname = detected.trim().removePrefix("@")
                 if (cleanNickname.isNotBlank()) {
+                    if (cleanNickname != lastDetectedNickname) {
+                        Log.d(TAG, "Scroll/Creator changed: @$cleanNickname (previous: @$lastDetectedNickname) from $packageName")
+                    }
                     lastDetectedNickname = cleanNickname
-                    Log.d(TAG, "Creator detected: @$cleanNickname from $packageName")
 
                     CreatorDetectionBus.dispatchDetectedCreator(
                         nickname = cleanNickname,

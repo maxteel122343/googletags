@@ -80,6 +80,8 @@ fun QuickModeSwitcherBar(
                         InterfaceVersion.COMPACT_FLOATING_CARD -> "V3 Popup"
                         InterfaceVersion.FULL_SPLIT_SCREEN -> "V4 Google 50%"
                         InterfaceVersion.BOTTOM_SHEET -> "V5 Sheet"
+                        InterfaceVersion.EXTRACTED_IMAGES_SCROLL -> "V6 Fotos"
+                        InterfaceVersion.CAROUSEL_PHOTO_CARDS -> "V7 Cards"
                     }
 
                     Box(

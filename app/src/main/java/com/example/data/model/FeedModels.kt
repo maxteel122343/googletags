@@ -35,6 +35,18 @@ enum class InterfaceVersion(
         subtitle = "Painel Deslizante",
         description = "Painel expansível que sobe da base com resultados do Google (Instagram, YouTube, Blog).",
         iconName = "expand_less"
+    ),
+    EXTRACTED_IMAGES_SCROLL(
+        title = "6. Fotos Extraídas",
+        subtitle = "Horizontal Scroll (V6)",
+        description = "Painel inferior estilo V5 com extração JS das fotos do Google em rolagem horizontal limpa.",
+        iconName = "collections"
+    ),
+    CAROUSEL_PHOTO_CARDS(
+        title = "7. Carrossel de Fotos",
+        subtitle = "Cards Horizontais (V7)",
+        description = "Cards elegantes em carrossel horizontal com fotos e dados extraídos do Google.",
+        iconName = "view_carousel"
     );
 
     val id: Int get() = ordinal + 1
