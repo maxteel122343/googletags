@@ -46,6 +46,7 @@ object CreatorDetectionBus {
         _activeSearchKeyword.value = "fotos"
         _activeInterfaceVersion.value = com.example.data.model.InterfaceVersion.BOTTOM_HORIZONTAL_CARDS
         _availableKeywords.value = listOf("fotos", "beach", "look", "routine", "instagram")
+        FloatingOverlayManager.resetForTesting()
     }
 
     fun setAccessibilityConnected(connected: Boolean) {
@@ -69,9 +70,6 @@ object CreatorDetectionBus {
     }
 
     fun setInterfaceVersion(version: com.example.data.model.InterfaceVersion) {
-        if (_activeInterfaceVersion.value == version && FloatingOverlayManager.isShowing()) {
-            return
-        }
         _activeInterfaceVersion.value = version
         if (FloatingOverlayManager.isShowing()) {
             FloatingOverlayManager.switchInterfaceVersion(version)

@@ -16,4 +16,10 @@ class ExampleAppTest {
         assertEquals("dancequeen_official", videos[2].nickname)
         assertEquals("lifestyle.ana", videos[3].nickname)
     }
+
+    @Test
+    fun testInterfaceVersionsCount() {
+        // Exactly 5 clean interface versions (no duplicates)
+        assertEquals(5, com.example.data.model.InterfaceVersion.entries.size)
+    }
 }

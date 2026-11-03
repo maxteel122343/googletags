@@ -18,6 +18,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import java.net.URLEncoder
@@ -101,7 +102,7 @@ class FeedViewModel : ViewModel() {
 
         // Listen for version switches triggered directly from inside the overlay
         viewModelScope.launch {
-            CreatorDetectionBus.activeInterfaceVersion.collect { ver ->
+            CreatorDetectionBus.activeInterfaceVersion.drop(1).collect { ver ->
                 if (ver != _uiState.value.activeInterfaceVersion) {
                     _uiState.update { it.copy(activeInterfaceVersion = ver) }
                 }

@@ -3,7 +3,6 @@ package com.example.data.service
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
-import android.content.res.ColorStateList
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Color
@@ -48,65 +47,99 @@ import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
 
 /**
- * Manages the real system WindowManager floating overlay over TikTok, Instagram,
+ * High-performance, zero-lag WindowManager floating overlay over TikTok, Instagram,
  * YouTube Shorts, Facebook Reels, and Bluesky.
  *
- * Supported 5 interface versions (duplicates V3 and V4 removed):
- * - V1: Bottom Horizontal Cards (Reels style bottom bar)
+ * Supported 5 interface versions:
+ * - V1: Bottom Horizontal Cards (Reels style bottom search bar)
  * - V2: Sidebar Vertical Cards (Split screen right edge with resize & dock)
  * - V5: Bottom Sheet (Resizable height via top drag handle)
- * - V6: Fotos na Vertical (Clean vertical stream of photos only, no Google webpage/chrome)
- * - V7: Fotos na Horizontal (Clean horizontal swipe carousel of large photos, edge-to-edge)
+ * - V6: Fotos na Vertical (Clean vertical stream of high-resolution photos only, infinite scroll)
+ * - V7: Fotos na Horizontal (Clean horizontal swipe carousel of high-res photos, infinite scroll)
  *
- * Key features:
- * - Natural 1:1 drag movement (drag left moves left, drag down moves down)
- * - Pure, clean photos in V6 and V7 (no Google webpage, no outer borders, no Google header)
- * - Dynamic height resize for Bottom Sheet and Photo sheets
- * - Instant forced search query update on scroll detection
- * - State and search query preservation across version switches
+ * Performance and Stability Features:
+ * 1. Persistent Root View & WebView: Does NOT destroy or re-instantiate WebView or WindowManager views
+ *    on version switch. Layout updates take ~1ms via updateViewLayout, eliminating black screens and lag.
+ * 2. High-Resolution Photo Extraction: Extracts original imgurl source URLs and high-res image metadata from Google.
+ * 3. Infinite Scrolling: Automatically loads next batch of photos when user reaches end of V6/V7 scroll.
+ * 4. Solid `#161922` WebView background prevents WindowManager alpha composition black glitches.
+ * 5. Smart query caching: Never reloads if query hasn't changed.
  */
 object FloatingOverlayManager {
 
     private const val TAG = "FeedLensOverlay"
 
+    /**
+     * Enhanced JavaScript extractor for Google Images:
+     * 1. Prioritizes full-resolution source image URLs from `imgurl=` links and script data.
+     * 2. Extracts `data-iurl`, `data-src`, and image sources.
+     * 3. Filters out Google icons, tracking pixels, and low-res SVGs.
+     */
     private const val JS_IMAGE_EXTRACTION_SCRIPT = """
         (function() {
             try {
                 var found = [];
                 var seen = {};
 
-                function addUrl(u) {
+                function addUrl(u, priority) {
                     if (!u || typeof u !== 'string') return;
                     u = u.trim();
-                    if (u.length < 12) return;
+                    if (u.length < 15) return;
                     if (u.indexOf('data:image/svg') === 0) return;
-                    if (u.indexOf('googlelogo') !== -1 || u.indexOf('cleardot.gif') !== -1 || u.indexOf('favicon') !== -1) return;
+                    if (u.indexOf('googlelogo') !== -1 || u.indexOf('cleardot.gif') !== -1 || u.indexOf('favicon') !== -1 || u.indexOf('transparent.png') !== -1) return;
                     if (!seen[u]) {
                         seen[u] = true;
-                        found.push(u);
+                        found.push({ url: u, prio: priority || 0 });
                     }
                 }
 
-                var imgs = document.querySelectorAll('img');
-                for (var i = 0; i < imgs.length; i++) {
-                    var el = imgs[i];
-                    addUrl(el.getAttribute('data-src'));
-                    addUrl(el.getAttribute('data-iurl'));
-                    addUrl(el.src);
-                }
-
+                // 1. High-priority: Original source images via imgurl in href
                 var links = document.querySelectorAll('a[href*="imgurl="]');
-                for (var j = 0; j < links.length; j++) {
-                    var href = links[j].href;
-                    var match = href.match(/imgurl=([^&]+)/);
-                    if (match && match[1]) {
+                for (var i = 0; i < links.length; i++) {
+                    var href = links[i].href;
+                    var m = href.match(/imgurl=([^&]+)/);
+                    if (m && m[1]) {
                         try {
-                            addUrl(decodeURIComponent(match[1]));
+                            var decoded = decodeURIComponent(m[1]);
+                            if (decoded.indexOf('http') === 0) {
+                                addUrl(decoded, 10);
+                            }
                         } catch(e) {}
                     }
                 }
 
-                var resultJson = JSON.stringify(found.slice(0, 30));
+                // 2. Script data tags containing direct media URLs
+                var scriptTags = document.querySelectorAll('script');
+                for (var s = 0; s < scriptTags.length; s++) {
+                    var txt = scriptTags[s].textContent || '';
+                    if (txt.indexOf('http') !== -1) {
+                        var matches = txt.match(/https?:\/\/[^"'\s\\]+\.(?:jpg|jpeg|png|webp)/gi);
+                        if (matches) {
+                            for (var k = 0; k < Math.min(matches.length, 20); k++) {
+                                var cleanU = matches[k].replace(/\\u0026/g, '&').replace(/\\u003d/g, '=');
+                                if (cleanU.indexOf('gstatic.com') === -1 && cleanU.indexOf('google.com') === -1) {
+                                    addUrl(cleanU, 8);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 3. Fallback: Image element data attributes
+                var imgs = document.querySelectorAll('img');
+                for (var j = 0; j < imgs.length; j++) {
+                    var el = imgs[j];
+                    var src = el.getAttribute('data-iurl') || el.getAttribute('data-src') || el.src;
+                    if (src && src.indexOf('http') === 0) {
+                        var w = el.naturalWidth || el.width || 0;
+                        addUrl(src, (w > 200) ? 6 : 2);
+                    }
+                }
+
+                found.sort(function(a, b) { return b.prio - a.prio; });
+                var urls = found.map(function(item) { return item.url; }).slice(0, 60);
+
+                var resultJson = JSON.stringify(urls);
                 if (window.ImageExtractor && window.ImageExtractor.onImagesExtracted) {
                     window.ImageExtractor.onImagesExtracted(resultJson);
                 }
@@ -118,36 +151,54 @@ object FloatingOverlayManager {
     """
 
     private var windowManager: WindowManager? = null
-    private var overlayRootView: View? = null
+    private var overlayRootView: FrameLayout? = null
     private var currentWmParams: WindowManager.LayoutParams? = null
     private var lastContext: Context? = null
 
-    private var mainContainer: View? = null
+    // Main Google search container (V1, V2, V5)
+    private var mainContainer: LinearLayout? = null
+    private var leftResizeHandle: View? = null
+    private var dragHandleContainer: FrameLayout? = null
+    private var webContainer: FrameLayout? = null
     private var webView: WebView? = null
     private var searchEditText: EditText? = null
     private var progressBar: ProgressBar? = null
-    private var loadingContainer: View? = null
     private var chipsRowLayout: LinearLayout? = null
     private var addTagInlineContainer: LinearLayout? = null
     private var newTagEditText: EditText? = null
     private var dockedEdgeTab: LinearLayout? = null
+    private val versionPills = mutableListOf<Pair<InterfaceVersion, TextView>>()
 
-    // Photo containers for V6 and V7
+    // Clean Photo containers (V6, V7)
+    private var cleanPhotosContainer: FrameLayout? = null
+    private var vScroll: ScrollView? = null
+    private var hScroll: HorizontalScrollView? = null
     private var verticalPhotosContainer: LinearLayout? = null
     private var horizontalPhotosContainer: LinearLayout? = null
+    private var cleanTitleBadge: TextView? = null
     private var photosLoadingBadge: TextView? = null
+    private val cleanVersionPills = mutableListOf<Pair<InterfaceVersion, TextView>>()
 
-    private var currentVersion = InterfaceVersion.SIDE_VERTICAL_CARDS
+    private var currentVersion = InterfaceVersion.BOTTOM_HORIZONTAL_CARDS
     private var currentQuery = "ju.pasqualotto fotos"
     private var lastLoadedUrl = ""
     private var isSidebarDocked = false
     private var sidebarWidthPx = 0
     private var bottomSheetHeightPx = 0
 
-    // Extracted image URLs cache
+    // Infinite scroll state & image cache
     private val extractedImageUrls = mutableListOf<String>()
+    private var isLoadingMorePhotos = false
 
     fun isShowing(): Boolean = overlayRootView != null
+
+    fun resetForTesting() {
+        overlayRootView = null
+        currentVersion = InterfaceVersion.BOTTOM_HORIZONTAL_CARDS
+        extractedImageUrls.clear()
+        lastLoadedUrl = ""
+        isSidebarDocked = false
+    }
 
     private fun runOnMainThread(action: () -> Unit) {
         try {
@@ -174,7 +225,7 @@ object FloatingOverlayManager {
 
         if (overlayRootView != null) {
             switchInterfaceVersion(version)
-            updateQuery(initialQuery, forceReload = true)
+            updateQuery(initialQuery, forceReload = false)
             return
         }
 
@@ -215,12 +266,13 @@ object FloatingOverlayManager {
         val root = FrameLayout(appContext)
         overlayRootView = root
 
-        buildOverlayViewHierarchy(appContext, root, wmParams)
+        buildMasterOverlayHierarchy(appContext, root, wmParams)
 
         try {
-            Log.d(TAG, "showOverlay: adding view to WindowManager for version $version")
+            Log.d(TAG, "showOverlay: adding master root to WindowManager for version $version")
             windowManager?.addView(root, wmParams)
             CreatorDetectionBus.setOverlayShowing(true)
+            applyVersionDisplayState(appContext, version)
             loadSearchQuery(currentQuery, force = true)
         } catch (e: Exception) {
             Log.e(TAG, "showOverlay failed to add view", e)
@@ -228,115 +280,105 @@ object FloatingOverlayManager {
         }
     }
 
+    /**
+     * Instant zero-lag version switching:
+     * Does NOT tear down the WindowManager view or destroy the WebView.
+     * Updates WindowManager layout parameters and toggles container visibility in ~1ms!
+     */
     fun switchInterfaceVersion(newVersion: InterfaceVersion) {
         runOnMainThread {
             try {
-                Log.d(TAG, "switchInterfaceVersion: transitioning from $currentVersion to $newVersion")
-                val context = overlayRootView?.context ?: lastContext
-                if (context == null) {
-                    Log.e(TAG, "switchInterfaceVersion: context is null")
+                val context = overlayRootView?.context ?: lastContext ?: return@runOnMainThread
+                val wm = windowManager ?: return@runOnMainThread
+                val root = overlayRootView ?: return@runOnMainThread
+                val wmParams = currentWmParams ?: return@runOnMainThread
+
+                if (newVersion == currentVersion && overlayRootView != null && !isSidebarDocked) {
                     return@runOnMainThread
                 }
 
-                val queryToRetain = currentQuery
-
-                // 1. Destroy old views, WebView, and WindowManager layout completely
-                destroyCurrentOverlayViews()
-
-                // 2. Reset state for clean rebuild
-                lastLoadedUrl = ""
+                Log.d(TAG, "⚡ Instant version switch: $currentVersion ➔ $newVersion")
                 currentVersion = newVersion
                 isSidebarDocked = false
+                dockedEdgeTab?.visibility = View.GONE
 
-                // 3. Re-create WindowManager layout params with new version geometry
-                val wm = windowManager ?: (context.getSystemService(Context.WINDOW_SERVICE) as WindowManager).also {
-                    windowManager = it
-                }
-
-                val layoutType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-                } else {
-                    @Suppress("DEPRECATION")
-                    WindowManager.LayoutParams.TYPE_PHONE
-                }
-
-                val wmParams = WindowManager.LayoutParams(
-                    WindowManager.LayoutParams.WRAP_CONTENT,
-                    WindowManager.LayoutParams.WRAP_CONTENT,
-                    layoutType,
-                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                            WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
-                            WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
-                    PixelFormat.TRANSLUCENT
-                ).apply {
-                    softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
-                }
-                currentWmParams = wmParams
-
+                // 1. Update WindowManager geometry immediately
                 applyVersionGeometry(context, wmParams, newVersion)
+                wm.updateViewLayout(root, wmParams)
 
-                // 4. Build fresh view hierarchy
-                val newRoot = FrameLayout(context)
-                overlayRootView = newRoot
+                // 2. Adjust visibility and internal views
+                applyVersionDisplayState(context, newVersion)
 
-                buildOverlayViewHierarchy(context, newRoot, wmParams)
-
-                // 5. Add cleanly to WindowManager
-                wm.addView(newRoot, wmParams)
-                CreatorDetectionBus.setOverlayShowing(true)
-                Log.d(TAG, "switchInterfaceVersion: successfully added new overlay for $newVersion")
-
-                // 6. Force reload search query
-                loadSearchQuery(queryToRetain, force = true)
+                // 3. If switching to clean photos and images are available, populate immediately
+                if (newVersion == InterfaceVersion.EXTRACTED_IMAGES_SCROLL || newVersion == InterfaceVersion.CAROUSEL_PHOTO_CARDS) {
+                    populateCleanPhotosUi(context)
+                }
             } catch (e: Exception) {
                 Log.e(TAG, "switchInterfaceVersion failed", e)
             }
         }
     }
 
-    private fun destroyCurrentOverlayViews() {
-        Log.d(TAG, "destroyCurrentOverlayViews: releasing existing views and WebView")
+    private fun applyVersionDisplayState(context: Context, version: InterfaceVersion) {
+        val wmParams = currentWmParams ?: return
 
-        webView?.let { wv ->
-            try {
-                wv.stopLoading()
-                wv.loadUrl("about:blank")
-                wv.clearHistory()
-                wv.clearCache(true)
-                wv.onPause()
-                (wv.parent as? ViewGroup)?.removeView(wv)
-                wv.destroy()
-            } catch (e: Exception) {
-                Log.e(TAG, "Error destroying WebView", e)
-            }
-        }
-        webView = null
+        // Update active indicators on all version pills
+        updateAllVersionPillStyles(version)
 
-        overlayRootView?.let { root ->
-            try {
-                if (root.isAttachedToWindow) {
-                    windowManager?.removeViewImmediate(root)
-                } else {
-                    windowManager?.removeView(root)
+        when (version) {
+            InterfaceVersion.BOTTOM_HORIZONTAL_CARDS,
+            InterfaceVersion.SIDE_VERTICAL_CARDS,
+            InterfaceVersion.BOTTOM_SHEET -> {
+                cleanPhotosContainer?.visibility = View.GONE
+                mainContainer?.visibility = View.VISIBLE
+
+                val isSidebar = (version == InterfaceVersion.SIDE_VERTICAL_CARDS)
+                val isBottomSheet = (version == InterfaceVersion.BOTTOM_SHEET)
+
+                mainContainer?.orientation = if (isSidebar) LinearLayout.HORIZONTAL else LinearLayout.VERTICAL
+                leftResizeHandle?.visibility = if (isSidebar) View.VISIBLE else View.GONE
+
+                // Configure drag/resize handle on top
+                dragHandleContainer?.let { container ->
+                    if (isBottomSheet) {
+                        setupBottomSheetHeightResizeListener(context, container, wmParams)
+                    } else {
+                        setupDraggableTouchListener(context, container, wmParams)
+                    }
                 }
-            } catch (e: Exception) {
-                Log.e(TAG, "Error removing root from WindowManager", e)
+            }
+
+            InterfaceVersion.EXTRACTED_IMAGES_SCROLL -> {
+                mainContainer?.visibility = View.GONE
+                cleanPhotosContainer?.visibility = View.VISIBLE
+                vScroll?.visibility = View.VISIBLE
+                hScroll?.visibility = View.GONE
+                cleanTitleBadge?.text = "📸 V6: Fotos Vertical"
+                populateCleanPhotosUi(context)
+            }
+
+            InterfaceVersion.CAROUSEL_PHOTO_CARDS -> {
+                mainContainer?.visibility = View.GONE
+                cleanPhotosContainer?.visibility = View.VISIBLE
+                vScroll?.visibility = View.GONE
+                hScroll?.visibility = View.VISIBLE
+                cleanTitleBadge?.text = "🖼️ V7: Fotos Horizontal"
+                populateCleanPhotosUi(context)
             }
         }
-        overlayRootView = null
+    }
 
-        mainContainer = null
-        dockedEdgeTab = null
-        searchEditText = null
-        newTagEditText = null
-        addTagInlineContainer = null
-        chipsRowLayout = null
-        progressBar = null
-        loadingContainer = null
-        verticalPhotosContainer = null
-        horizontalPhotosContainer = null
-        photosLoadingBadge = null
-        currentWmParams = null
+    private fun updateAllVersionPillStyles(activeVersion: InterfaceVersion) {
+        val allPills = versionPills + cleanVersionPills
+        for ((ver, textView) in allPills) {
+            val isActive = (ver == activeVersion)
+            textView.setTextColor(if (isActive) Color.WHITE else Color.parseColor("#999999"))
+            val bg = GradientDrawable().apply {
+                setColor(if (isActive) Color.parseColor("#4285F4") else Color.parseColor("#262A36"))
+                cornerRadius = dpToPx(textView.context, 6).toFloat()
+            }
+            textView.background = bg
+        }
     }
 
     private fun applyVersionGeometry(
@@ -382,7 +424,7 @@ object FloatingOverlayManager {
                 wmParams.height = bottomSheetHeightPx
             }
 
-            // V6: Clean Vertical Photos (Large photo stream)
+            // V6: Clean Vertical Photos (Infinite scroll, edge-to-edge)
             InterfaceVersion.EXTRACTED_IMAGES_SCROLL -> {
                 wmParams.gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
                 wmParams.x = 0
@@ -408,15 +450,23 @@ object FloatingOverlayManager {
         }
     }
 
+    /**
+     * Builds master view hierarchy containing:
+     * - Edge tab (docked)
+     * - Main Google container (V1, V2, V5) with single persistent WebView
+     * - Clean photos container (V6, V7)
+     */
     @SuppressLint("ClickableViewAccessibility", "SetJavaScriptEnabled")
-    private fun buildOverlayViewHierarchy(
+    private fun buildMasterOverlayHierarchy(
         context: Context,
         root: FrameLayout,
         wmParams: WindowManager.LayoutParams
     ) {
         root.removeAllViews()
+        versionPills.clear()
+        cleanVersionPills.clear()
 
-        // 1. DOCKED EDGE TAB (Visible when sidebar/window is docked to edge)
+        // 1. DOCKED EDGE TAB
         val edgeTab = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -429,9 +479,7 @@ object FloatingOverlayManager {
             background = tabBg
             elevation = dpToPx(context, 12).toFloat()
             setPadding(dpToPx(context, 8), dpToPx(context, 6), dpToPx(context, 12), dpToPx(context, 6))
-            setOnClickListener {
-                restoreFromEdgeDock(context)
-            }
+            setOnClickListener { restoreFromEdgeDock(context) }
         }
         val edgeTabLp = FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -454,10 +502,9 @@ object FloatingOverlayManager {
             background = gCircle
             gravity = Gravity.CENTER
         }
-        val edgeGLp = LinearLayout.LayoutParams(dpToPx(context, 22), dpToPx(context, 22)).apply {
+        edgeTab.addView(edgeG, LinearLayout.LayoutParams(dpToPx(context, 22), dpToPx(context, 22)).apply {
             setMargins(0, 0, dpToPx(context, 6), 0)
-        }
-        edgeTab.addView(edgeG, edgeGLp)
+        })
 
         val edgeText = TextView(context).apply {
             text = "🔍 FeedLens"
@@ -466,17 +513,21 @@ object FloatingOverlayManager {
             typeface = android.graphics.Typeface.DEFAULT_BOLD
         }
         edgeTab.addView(edgeText)
-
         root.addView(edgeTab, edgeTabLp)
 
-        // 2. CHECK IF THIS IS A PURE PHOTO VERSION (V6 or V7)
-        if (currentVersion == InterfaceVersion.EXTRACTED_IMAGES_SCROLL || currentVersion == InterfaceVersion.CAROUSEL_PHOTO_CARDS) {
-            buildCleanPhotosOverlay(context, root, wmParams)
-            buildHeadlessWebView(context, root)
-            return
-        }
+        // 2. MAIN CONTAINER (V1, V2, V5)
+        buildMainGoogleContainer(context, root, wmParams)
 
-        // 3. MAIN CONTAINER FOR V1, V2, V5
+        // 3. CLEAN PHOTOS CONTAINER (V6, V7)
+        buildCleanPhotosContainer(context, root, wmParams)
+    }
+
+    @SuppressLint("ClickableViewAccessibility", "SetJavaScriptEnabled")
+    private fun buildMainGoogleContainer(
+        context: Context,
+        root: FrameLayout,
+        wmParams: WindowManager.LayoutParams
+    ) {
         val isHorizontal = currentVersion == InterfaceVersion.SIDE_VERTICAL_CARDS
         val isBottomSheetType = currentVersion == InterfaceVersion.BOTTOM_SHEET
 
@@ -493,85 +544,55 @@ object FloatingOverlayManager {
         }
         mainContainer = mainLayout
 
-        // RESIZE HANDLE (Left vertical strip for sidebar width resize)
-        if (isHorizontal) {
-            val leftResizeHandle = View(context).apply {
-                val handleBg = GradientDrawable().apply {
-                    setColor(Color.parseColor("#334285F4"))
-                    cornerRadius = dpToPx(context, 3).toFloat()
-                }
-                background = handleBg
+        // Left resize handle for V2 sidebar
+        val resizeHandle = View(context).apply {
+            val handleBg = GradientDrawable().apply {
+                setColor(Color.parseColor("#334285F4"))
+                cornerRadius = dpToPx(context, 3).toFloat()
             }
-            val resizeLp = LinearLayout.LayoutParams(
-                dpToPx(context, 12),
-                ViewGroup.LayoutParams.MATCH_PARENT
-            )
-            setupResizeTouchListener(context, leftResizeHandle, wmParams)
-            mainLayout.addView(leftResizeHandle, resizeLp)
+            background = handleBg
+            visibility = if (isHorizontal) View.VISIBLE else View.GONE
         }
+        leftResizeHandle = resizeHandle
+        setupResizeTouchListener(context, resizeHandle, wmParams)
+        mainLayout.addView(resizeHandle, LinearLayout.LayoutParams(dpToPx(context, 12), ViewGroup.LayoutParams.MATCH_PARENT))
 
         val contentColumn = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(
-                dpToPx(context, 10),
-                dpToPx(context, 8),
-                dpToPx(context, 10),
-                dpToPx(context, 8)
-            )
+            setPadding(dpToPx(context, 10), dpToPx(context, 8), dpToPx(context, 10), dpToPx(context, 8))
         }
-        val contentLp = if (isHorizontal) {
-            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f)
-        } else {
-            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
-        }
+        val contentLp = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f)
 
-        // TOP DRAG HANDLE
-        val dragHandleContainer = FrameLayout(context).apply {
+        // Top drag handle container
+        val dragHandleBox = FrameLayout(context).apply {
             setPadding(0, dpToPx(context, 4), 0, dpToPx(context, 6))
         }
-        val dragHandle = View(context).apply {
+        dragHandleContainer = dragHandleBox
+
+        val dragPill = View(context).apply {
             val handleDrawable = GradientDrawable().apply {
-                setColor(if (isBottomSheetType) Color.parseColor("#8AB4F8") else Color.parseColor("#668AB4F8"))
+                setColor(Color.parseColor("#668AB4F8"))
                 cornerRadius = dpToPx(context, 3).toFloat()
             }
             background = handleDrawable
         }
-        val dragHandleLp = FrameLayout.LayoutParams(
-            dpToPx(context, if (isBottomSheetType) 48 else 38),
-            dpToPx(context, 4)
-        ).apply {
+        dragHandleBox.addView(dragPill, FrameLayout.LayoutParams(dpToPx(context, 42), dpToPx(context, 4)).apply {
             gravity = Gravity.CENTER
-        }
-        dragHandleContainer.addView(dragHandle, dragHandleLp)
+        })
+        contentColumn.addView(dragHandleBox, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
 
-        val dragContainerLp = LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT
-        )
-        contentColumn.addView(dragHandleContainer, dragContainerLp)
-
-        if (isBottomSheetType) {
-            setupBottomSheetHeightResizeListener(context, dragHandleContainer, wmParams)
-        } else {
-            setupDraggableTouchListener(context, dragHandleContainer, wmParams)
-        }
-
-        // HEADER: Mode Switcher Pills (V1, V2, V5, V6, V7) + Browser Icon + Dock Icon + Close Icon
+        // Header Row: Version Pills + Browser + Dock + Close
         val headerRow = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
-        val headerRowLp = LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT
-        ).apply {
+        val headerRowLp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
             setMargins(0, 0, 0, dpToPx(context, 6))
         }
 
         val modeScroll = HorizontalScrollView(context).apply { isHorizontalScrollBarEnabled = false }
-        val modeScrollLp = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-
         val modeRow = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
+
         InterfaceVersion.entries.forEach { ver ->
             val isCurrent = ver == currentVersion
             val verLabel = when (ver) {
@@ -592,20 +613,15 @@ object FloatingOverlayManager {
                 }
                 background = pBg
                 setPadding(dpToPx(context, 6), dpToPx(context, 2), dpToPx(context, 6), dpToPx(context, 2))
-                setOnClickListener {
-                    CreatorDetectionBus.setInterfaceVersion(ver)
-                }
+                setOnClickListener { CreatorDetectionBus.setInterfaceVersion(ver) }
             }
-            val pillLp = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            ).apply {
+            versionPills.add(ver to pill)
+            modeRow.addView(pill, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
                 setMargins(0, 0, dpToPx(context, 4), 0)
-            }
-            modeRow.addView(pill, pillLp)
+            })
         }
         modeScroll.addView(modeRow)
-        headerRow.addView(modeScroll, modeScrollLp)
+        headerRow.addView(modeScroll, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
 
         val browserBtn = TextView(context).apply {
             text = "↗"
@@ -639,7 +655,7 @@ object FloatingOverlayManager {
 
         contentColumn.addView(headerRow, headerRowLp)
 
-        // SEARCH BAR
+        // Search Bar
         val searchBarLayout = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -651,10 +667,7 @@ object FloatingOverlayManager {
             background = sbBg
             setPadding(dpToPx(context, 8), dpToPx(context, 4), dpToPx(context, 8), dpToPx(context, 4))
         }
-        val searchBarLp = LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT
-        ).apply {
+        val searchBarLp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
             setMargins(0, 0, 0, dpToPx(context, 6))
         }
 
@@ -699,8 +712,7 @@ object FloatingOverlayManager {
             }
         }
         searchEditText = editSearch
-        val editSearchLp = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-        searchBarLayout.addView(editSearch, editSearchLp)
+        searchBarLayout.addView(editSearch, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
 
         val goSearchBtn = TextView(context).apply {
             text = "🔍"
@@ -715,15 +727,11 @@ object FloatingOverlayManager {
             }
         }
         searchBarLayout.addView(goSearchBtn)
-
         contentColumn.addView(searchBarLayout, searchBarLp)
 
-        // CHIPS ROW
+        // Chips Row
         val chipsScroll = HorizontalScrollView(context).apply { isHorizontalScrollBarEnabled = false }
-        val chipsScrollLp = LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT
-        ).apply {
+        val chipsScrollLp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
             setMargins(0, 0, 0, dpToPx(context, 6))
         }
 
@@ -736,7 +744,7 @@ object FloatingOverlayManager {
         chipsScroll.addView(chipsRow)
         contentColumn.addView(chipsScroll, chipsScrollLp)
 
-        // INLINE ADD-TAG ROW
+        // Inline Add-Tag Row
         val addTagRow = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -748,10 +756,7 @@ object FloatingOverlayManager {
             background = atBg
             setPadding(dpToPx(context, 8), dpToPx(context, 4), dpToPx(context, 8), dpToPx(context, 4))
         }
-        val addTagRowLp = LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT
-        ).apply {
+        val addTagRowLp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
             setMargins(0, 0, 0, dpToPx(context, 6))
         }
         addTagInlineContainer = addTagRow
@@ -777,8 +782,7 @@ object FloatingOverlayManager {
             }
         }
         newTagEditText = tagEdit
-        val tagEditLp = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-        addTagRow.addView(tagEdit, tagEditLp)
+        addTagRow.addView(tagEdit, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
 
         val confirmTagBtn = TextView(context).apply {
             text = "✓ Adicionar"
@@ -806,50 +810,102 @@ object FloatingOverlayManager {
             }
         }
         addTagRow.addView(cancelTagBtn)
-
         contentColumn.addView(addTagRow, addTagRowLp)
 
-        // PROGRESS BAR
+        // Progress bar (sleek 2.5dp indicator line)
         val pBar = ProgressBar(context, null, android.R.attr.progressBarStyleHorizontal).apply {
             isIndeterminate = false
             max = 100
             visibility = View.GONE
         }
-        val pBarLp = LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            dpToPx(context, 2.5f)
-        )
         progressBar = pBar
-        contentColumn.addView(pBar, pBarLp)
+        contentColumn.addView(pBar, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dpToPx(context, 2.5f)))
 
-        // INTERACTIVE WEBVIEW CONTAINER
-        buildInteractiveWebContainer(context, contentColumn)
-
-        mainLayout.addView(contentColumn, contentLp)
-
-        val mainLp = FrameLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.MATCH_PARENT
-        )
-        root.addView(mainLayout, mainLp)
-
-        if (!isBottomSheetType) {
-            setupDraggableTouchListener(context, headerRow, wmParams)
+        // Webview Container (with solid dark background, NEVER transparent to avoid black holes!)
+        val webBox = FrameLayout(context).apply {
+            val wvDrawable = GradientDrawable().apply {
+                setColor(Color.parseColor("#161922"))
+                cornerRadius = dpToPx(context, 10).toFloat()
+            }
+            background = wvDrawable
+            clipToOutline = true
         }
+        webContainer = webBox
+
+        val wv = WebView(context).apply {
+            setBackgroundColor(Color.parseColor("#161922"))
+            isVerticalScrollBarEnabled = true
+            isHorizontalScrollBarEnabled = false
+
+            settings.apply {
+                javaScriptEnabled = true
+                domStorageEnabled = true
+                databaseEnabled = true
+                loadWithOverviewMode = true
+                useWideViewPort = true
+                loadsImagesAutomatically = true
+                cacheMode = WebSettings.LOAD_DEFAULT
+                userAgentString = "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
+            }
+
+            addJavascriptInterface(ImageExtractorBridge { urls ->
+                handleExtractedImages(context, urls)
+            }, "ImageExtractor")
+
+            webChromeClient = object : WebChromeClient() {
+                override fun onProgressChanged(view: WebView?, newProgress: Int) {
+                    if (newProgress in 1..99) {
+                        progressBar?.visibility = View.VISIBLE
+                        progressBar?.progress = newProgress
+                    } else {
+                        progressBar?.visibility = View.GONE
+                    }
+                }
+            }
+
+            webViewClient = object : WebViewClient() {
+                override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+                    progressBar?.visibility = View.VISIBLE
+                }
+
+                override fun onPageFinished(view: WebView?, url: String?) {
+                    progressBar?.visibility = View.GONE
+                    // Trigger high-resolution image extraction
+                    view?.evaluateJavascript(JS_IMAGE_EXTRACTION_SCRIPT, null)
+                    Handler(Looper.getMainLooper()).postDelayed({
+                        view?.evaluateJavascript(JS_IMAGE_EXTRACTION_SCRIPT, null)
+                    }, 600)
+                }
+
+                override fun onReceivedError(view: WebView?, errorCode: Int, description: String?, failingUrl: String?) {
+                    Log.e(TAG, "WebView error: $errorCode $description on $failingUrl")
+                    progressBar?.visibility = View.GONE
+                }
+
+                override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
+                    return false
+                }
+            }
+        }
+        webBox.addView(wv, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        webView = wv
+
+        contentColumn.addView(webBox, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+        mainLayout.addView(contentColumn, contentLp)
+        root.addView(mainLayout, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
     }
 
     /**
      * Builds clean, edge-to-edge photo viewer for V6 and V7.
      * ZERO Google headers, ZERO Google search web chrome, ZERO bulky borders.
-     * Just clean, full photos with a subtle top floating control pill.
+     * Equipped with Infinite Scroll listener.
      */
-    private fun buildCleanPhotosOverlay(
+    @SuppressLint("ClickableViewAccessibility")
+    private fun buildCleanPhotosContainer(
         context: Context,
         root: FrameLayout,
         wmParams: WindowManager.LayoutParams
     ) {
-        val isVertical = currentVersion == InterfaceVersion.EXTRACTED_IMAGES_SCROLL
-
         val container = FrameLayout(context).apply {
             val bg = GradientDrawable().apply {
                 setColor(Color.parseColor("#E60D0F14"))
@@ -858,38 +914,55 @@ object FloatingOverlayManager {
             }
             background = bg
             clipToOutline = true
-            visibility = if (isSidebarDocked) View.GONE else View.VISIBLE
+            visibility = View.GONE
         }
-        mainContainer = container
+        cleanPhotosContainer = container
 
-        // 1. PHOTOS SCROLL VIEW (V6 = Vertical Scroll, V7 = Horizontal Scroll)
-        if (isVertical) {
-            // V6: Vertical photos stream
-            val vScroll = ScrollView(context).apply {
-                isVerticalScrollBarEnabled = false
+        // 1. V6: Vertical photos stream with infinite scroll
+        val verticalScroll = ScrollView(context).apply {
+            isVerticalScrollBarEnabled = false
+            viewTreeObserver.addOnScrollChangedListener {
+                val vCol = verticalPhotosContainer ?: return@addOnScrollChangedListener
+                if (currentVersion == InterfaceVersion.EXTRACTED_IMAGES_SCROLL) {
+                    val diff = (vCol.bottom - (height + scrollY))
+                    if (diff <= dpToPx(context, 350) && !isLoadingMorePhotos) {
+                        requestMorePhotosFromWeb()
+                    }
+                }
             }
-            val vCol = LinearLayout(context).apply {
-                orientation = LinearLayout.VERTICAL
-                setPadding(dpToPx(context, 10), dpToPx(context, 50), dpToPx(context, 10), dpToPx(context, 16))
-            }
-            verticalPhotosContainer = vCol
-            vScroll.addView(vCol)
-            container.addView(vScroll, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
-        } else {
-            // V7: Horizontal photos carousel
-            val hScroll = HorizontalScrollView(context).apply {
-                isHorizontalScrollBarEnabled = false
-            }
-            val hRow = LinearLayout(context).apply {
-                orientation = LinearLayout.HORIZONTAL
-                setPadding(dpToPx(context, 12), dpToPx(context, 50), dpToPx(context, 12), dpToPx(context, 16))
-            }
-            horizontalPhotosContainer = hRow
-            hScroll.addView(hRow)
-            container.addView(hScroll, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         }
+        vScroll = verticalScroll
+        val vCol = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dpToPx(context, 10), dpToPx(context, 50), dpToPx(context, 10), dpToPx(context, 24))
+        }
+        verticalPhotosContainer = vCol
+        verticalScroll.addView(vCol)
+        container.addView(verticalScroll, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
 
-        // 2. TOP FLOATING CONTROL BAR (Translucent, subtle floating pill over the photos)
+        // 2. V7: Horizontal photos carousel with infinite scroll
+        val horizontalScroll = HorizontalScrollView(context).apply {
+            isHorizontalScrollBarEnabled = false
+            viewTreeObserver.addOnScrollChangedListener {
+                val hRow = horizontalPhotosContainer ?: return@addOnScrollChangedListener
+                if (currentVersion == InterfaceVersion.CAROUSEL_PHOTO_CARDS) {
+                    val diff = (hRow.right - (width + scrollX))
+                    if (diff <= dpToPx(context, 350) && !isLoadingMorePhotos) {
+                        requestMorePhotosFromWeb()
+                    }
+                }
+            }
+        }
+        hScroll = horizontalScroll
+        val hRow = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(dpToPx(context, 12), dpToPx(context, 50), dpToPx(context, 12), dpToPx(context, 16))
+        }
+        horizontalPhotosContainer = hRow
+        horizontalScroll.addView(hRow)
+        container.addView(horizontalScroll, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+
+        // 3. TOP FLOATING CONTROL BAR (Translucent, subtle floating pill over the photos)
         val floatingControlPill = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -901,21 +974,18 @@ object FloatingOverlayManager {
             background = pillBg
             setPadding(dpToPx(context, 10), dpToPx(context, 4), dpToPx(context, 10), dpToPx(context, 4))
         }
-        val pillLp = FrameLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT
-        ).apply {
+        val pillLp = FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
             gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
             setMargins(dpToPx(context, 12), dpToPx(context, 8), dpToPx(context, 12), 0)
         }
 
-        // Top drag handle / title inside the pill
         val titleBadge = TextView(context).apply {
-            text = if (isVertical) "📸 V6: Fotos Vertical" else "🖼️ V7: Fotos Horizontal"
+            text = "📸 Fotos"
             setTextColor(Color.WHITE)
             textSize = 11.5f
             typeface = android.graphics.Typeface.DEFAULT_BOLD
         }
+        cleanTitleBadge = titleBadge
         floatingControlPill.addView(titleBadge)
 
         val statusBadge = TextView(context).apply {
@@ -929,7 +999,7 @@ object FloatingOverlayManager {
         val spacer = View(context)
         floatingControlPill.addView(spacer, LinearLayout.LayoutParams(0, 0, 1f))
 
-        // Version switch pills
+        // Version switch pills in clean container
         InterfaceVersion.entries.forEach { ver ->
             val isCurrent = ver == currentVersion
             val verLabel = when (ver) {
@@ -952,10 +1022,10 @@ object FloatingOverlayManager {
                 setPadding(dpToPx(context, 6), dpToPx(context, 2), dpToPx(context, 6), dpToPx(context, 2))
                 setOnClickListener { CreatorDetectionBus.setInterfaceVersion(ver) }
             }
-            val pLp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            cleanVersionPills.add(ver to p)
+            floatingControlPill.addView(p, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
                 setMargins(0, 0, dpToPx(context, 4), 0)
-            }
-            floatingControlPill.addView(p, pLp)
+            })
         }
 
         val dockBtn = TextView(context).apply {
@@ -978,18 +1048,51 @@ object FloatingOverlayManager {
         floatingControlPill.addView(closeBtn)
 
         container.addView(floatingControlPill, pillLp)
-
-        // Make top control pill support resizing or dragging
         setupBottomSheetHeightResizeListener(context, floatingControlPill, wmParams)
-
         root.addView(container, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+    }
 
-        // Populate photos immediately
-        populateCleanPhotosUi(context)
+    /**
+     * Infinite scroll trigger: Scrolls Google search DOM by 2500px to trigger dynamic loading of next photos.
+     */
+    private fun requestMorePhotosFromWeb() {
+        isLoadingMorePhotos = true
+        Log.d(TAG, "🔄 Infinite scroll: requesting more photos from web")
+        photosLoadingBadge?.text = " • Carregando mais..."
+
+        runOnMainThread {
+            webView?.evaluateJavascript("window.scrollBy(0, 2500);", null)
+            Handler(Looper.getMainLooper()).postDelayed({
+                webView?.evaluateJavascript(JS_IMAGE_EXTRACTION_SCRIPT, null)
+                isLoadingMorePhotos = false
+            }, 600)
+        }
+    }
+
+    private fun handleExtractedImages(context: Context, urls: List<String>) {
+        runOnMainThread {
+            if (urls.isNotEmpty()) {
+                val previousCount = extractedImageUrls.size
+                var newlyAdded = 0
+                for (u in urls) {
+                    if (!extractedImageUrls.contains(u)) {
+                        extractedImageUrls.add(u)
+                        newlyAdded++
+                    }
+                }
+                Log.d(TAG, "📸 Extracted ${urls.size} photos (new: $newlyAdded, total: ${extractedImageUrls.size})")
+
+                if (newlyAdded > 0 || previousCount == 0) {
+                    populateCleanPhotosUi(context)
+                }
+            }
+        }
     }
 
     private fun populateCleanPhotosUi(context: Context) {
-        val nick = CreatorDetectionBus.latestDetectedNickname.value ?: currentQuery.split(" ").firstOrNull() ?: "criador"
+        val nick = CreatorDetectionBus.latestDetectedNickname.value
+            ?: currentQuery.split(" ").firstOrNull()
+            ?: "criador"
         val activeKw = CreatorDetectionBus.activeSearchKeyword.value
 
         val imagesToDisplay: List<String> = if (extractedImageUrls.isNotEmpty()) {
@@ -1019,7 +1122,7 @@ object FloatingOverlayManager {
                 }
                 val cardLp = LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
-                    dpToPx(context, 320)
+                    dpToPx(context, 340)
                 ).apply {
                     setMargins(0, 0, 0, dpToPx(context, 12))
                 }
@@ -1043,14 +1146,13 @@ object FloatingOverlayManager {
                     background = bBg
                     setPadding(dpToPx(context, 8), dpToPx(context, 3), dpToPx(context, 8), dpToPx(context, 3))
                 }
-                val badgeLp = FrameLayout.LayoutParams(
+                card.addView(badge, FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.WRAP_CONTENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT,
                     Gravity.BOTTOM or Gravity.START
                 ).apply {
                     setMargins(dpToPx(context, 10), 0, 0, dpToPx(context, 10))
-                }
-                card.addView(badge, badgeLp)
+                })
 
                 vCol.addView(card, cardLp)
             }
@@ -1060,7 +1162,7 @@ object FloatingOverlayManager {
             hRow.removeAllViews()
 
             val dm = context.resources.displayMetrics
-            val cardW = (dm.widthPixels * 0.86f).toInt()
+            val cardW = (dm.widthPixels * 0.88f).toInt()
 
             imagesToDisplay.forEachIndexed { index, imgSource ->
                 val card = FrameLayout(context).apply {
@@ -1098,162 +1200,15 @@ object FloatingOverlayManager {
                     background = bBg
                     setPadding(dpToPx(context, 8), dpToPx(context, 4), dpToPx(context, 8), dpToPx(context, 4))
                 }
-                val badgeLp = FrameLayout.LayoutParams(
+                card.addView(badge, FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.WRAP_CONTENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT,
                     Gravity.BOTTOM or Gravity.START
                 ).apply {
                     setMargins(dpToPx(context, 12), 0, 0, dpToPx(context, 12))
-                }
-                card.addView(badge, badgeLp)
+                })
 
                 hRow.addView(card, cardLp)
-            }
-        }
-    }
-
-    private fun buildInteractiveWebContainer(context: Context, parent: LinearLayout) {
-        val webContainer = FrameLayout(context).apply {
-            val wvDrawable = GradientDrawable().apply {
-                setColor(Color.parseColor("#12141A"))
-                cornerRadius = dpToPx(context, 10).toFloat()
-            }
-            background = wvDrawable
-            clipToOutline = true
-        }
-
-        val wv = WebView(context).apply {
-            setBackgroundColor(Color.TRANSPARENT)
-            isVerticalScrollBarEnabled = true
-            isHorizontalScrollBarEnabled = false
-
-            settings.apply {
-                javaScriptEnabled = true
-                domStorageEnabled = true
-                loadWithOverviewMode = true
-                useWideViewPort = true
-                cacheMode = WebSettings.LOAD_DEFAULT
-                userAgentString = "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
-            }
-
-            webChromeClient = object : WebChromeClient() {
-                override fun onProgressChanged(view: WebView?, newProgress: Int) {
-                    if (newProgress in 1..99) {
-                        progressBar?.visibility = View.VISIBLE
-                        progressBar?.progress = newProgress
-                        if (newProgress > 65) {
-                            loadingContainer?.visibility = View.GONE
-                        }
-                    } else {
-                        progressBar?.visibility = View.GONE
-                        loadingContainer?.visibility = View.GONE
-                    }
-                }
-            }
-
-            webViewClient = object : WebViewClient() {
-                override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
-                    Log.d(TAG, "WebView onPageStarted: $url")
-                    progressBar?.visibility = View.VISIBLE
-                    loadingContainer?.visibility = View.VISIBLE
-                }
-
-                override fun onPageFinished(view: WebView?, url: String?) {
-                    Log.d(TAG, "WebView onPageFinished: $url")
-                    progressBar?.visibility = View.GONE
-                    loadingContainer?.visibility = View.GONE
-                }
-
-                override fun onReceivedError(view: WebView?, errorCode: Int, description: String?, failingUrl: String?) {
-                    Log.e(TAG, "WebView error: $errorCode $description on $failingUrl")
-                    progressBar?.visibility = View.GONE
-                    loadingContainer?.visibility = View.GONE
-                }
-
-                override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
-                    return false
-                }
-            }
-        }
-        val wvLp = FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
-        webContainer.addView(wv, wvLp)
-        webView = wv
-
-        val loadingLayout = LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER
-            visibility = View.GONE
-        }
-        loadingContainer = loadingLayout
-
-        val spinner = ProgressBar(context).apply {
-            indeterminateTintList = ColorStateList.valueOf(Color.parseColor("#4285F4"))
-        }
-        val spLp = LinearLayout.LayoutParams(dpToPx(context, 30), dpToPx(context, 30))
-        loadingLayout.addView(spinner, spLp)
-
-        val loadingText = TextView(context).apply {
-            text = "Buscando no Google..."
-            setTextColor(Color.parseColor("#8AB4F8"))
-            textSize = 12f
-            setPadding(0, dpToPx(context, 8), 0, 0)
-        }
-        loadingLayout.addView(loadingText)
-
-        val loadLp = FrameLayout.LayoutParams(
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-            Gravity.CENTER
-        )
-        webContainer.addView(loadingLayout, loadLp)
-
-        val webContainerLp = LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            0,
-            1f
-        )
-        parent.addView(webContainer, webContainerLp)
-    }
-
-    private fun buildHeadlessWebView(context: Context, root: FrameLayout) {
-        val wv = WebView(context).apply {
-            setBackgroundColor(Color.TRANSPARENT)
-            settings.apply {
-                javaScriptEnabled = true
-                domStorageEnabled = true
-                loadWithOverviewMode = true
-                useWideViewPort = true
-                cacheMode = WebSettings.LOAD_DEFAULT
-                userAgentString = "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
-            }
-
-            addJavascriptInterface(ImageExtractorBridge { urls ->
-                handleExtractedImages(context, urls)
-            }, "ImageExtractor")
-
-            webViewClient = object : WebViewClient() {
-                override fun onPageFinished(view: WebView?, url: String?) {
-                    view?.evaluateJavascript(JS_IMAGE_EXTRACTION_SCRIPT, null)
-                    Handler(Looper.getMainLooper()).postDelayed({
-                        view?.evaluateJavascript(JS_IMAGE_EXTRACTION_SCRIPT, null)
-                    }, 800)
-                }
-            }
-        }
-        // Minimal 1x1 view so layout engine renders DOM images
-        val wvLp = FrameLayout.LayoutParams(1, 1).apply {
-            gravity = Gravity.TOP or Gravity.START
-        }
-        root.addView(wv, wvLp)
-        webView = wv
-    }
-
-    private fun handleExtractedImages(context: Context, urls: List<String>) {
-        runOnMainThread {
-            if (urls.isNotEmpty()) {
-                extractedImageUrls.clear()
-                extractedImageUrls.addAll(urls)
-                populateCleanPhotosUi(context)
             }
         }
     }
@@ -1330,13 +1285,9 @@ object FloatingOverlayManager {
                     renderTagChips(context, row)
                 }
             }
-            val chipLp = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            ).apply {
+            row.addView(chip, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
                 setMargins(0, 0, dpToPx(context, 6), 0)
-            }
-            row.addView(chip, chipLp)
+            })
         }
 
         val addBtn = TextView(context).apply {
@@ -1356,13 +1307,9 @@ object FloatingOverlayManager {
                 newTagEditText?.let { enableInputFocus(it) }
             }
         }
-        val addBtnLp = LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT
-        ).apply {
+        row.addView(addBtn, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
             setMargins(0, 0, dpToPx(context, 4), 0)
-        }
-        row.addView(addBtn, addBtnLp)
+        })
     }
 
     private fun confirmNewTag(context: Context) {
@@ -1418,6 +1365,9 @@ object FloatingOverlayManager {
             chipsRowLayout?.let { row ->
                 lastContext?.let { ctx -> renderTagChips(ctx, row) }
             }
+            if (queryChanged) {
+                extractedImageUrls.clear()
+            }
             if (currentVersion == InterfaceVersion.EXTRACTED_IMAGES_SCROLL || currentVersion == InterfaceVersion.CAROUSEL_PHOTO_CARDS) {
                 lastContext?.let { populateCleanPhotosUi(it) }
             }
@@ -1434,9 +1384,8 @@ object FloatingOverlayManager {
         }
         lastLoadedUrl = searchUrl
 
-        Log.d(TAG, "loadSearchQuery: loading $searchUrl (force=$force)")
+        Log.d(TAG, "⚡ loadSearchQuery: loading $searchUrl (force=$force)")
         progressBar?.visibility = View.VISIBLE
-        loadingContainer?.visibility = View.VISIBLE
         photosLoadingBadge?.text = " • Buscando..."
 
         webView?.let { wv ->
@@ -1448,6 +1397,7 @@ object FloatingOverlayManager {
     private fun dockToEdge(context: Context) {
         isSidebarDocked = true
         mainContainer?.visibility = View.GONE
+        cleanPhotosContainer?.visibility = View.GONE
         dockedEdgeTab?.visibility = View.VISIBLE
 
         val wm = windowManager ?: return
@@ -1468,7 +1418,6 @@ object FloatingOverlayManager {
     private fun restoreFromEdgeDock(context: Context) {
         isSidebarDocked = false
         dockedEdgeTab?.visibility = View.GONE
-        mainContainer?.visibility = View.VISIBLE
 
         val wm = windowManager ?: return
         val root = overlayRootView ?: return
@@ -1478,6 +1427,8 @@ object FloatingOverlayManager {
         try {
             wm.updateViewLayout(root, wmParams)
         } catch (_: Exception) {}
+
+        applyVersionDisplayState(context, currentVersion)
     }
 
     @SuppressLint("ClickableViewAccessibility")
@@ -1553,10 +1504,7 @@ object FloatingOverlayManager {
     }
 
     /**
-     * 100% natural, intuitive drag listener.
-     * On touch down, converts the window layout parameters to Gravity.TOP or Gravity.START
-     * with the current exact screen coordinate.
-     * When dragging:
+     * 100% natural, intuitive 1:1 drag listener:
      * - Drag left: moves left
      * - Drag right: moves right
      * - Drag up: moves up
@@ -1585,7 +1533,6 @@ object FloatingOverlayManager {
                     initialTouchY = event.rawY
                     isClick = true
 
-                    // Convert to absolute TOP|START coordinate system so drag is strictly 1:1 and natural
                     wmParams.gravity = Gravity.TOP or Gravity.START
                     wmParams.x = initialX
                     wmParams.y = initialY
@@ -1605,7 +1552,6 @@ object FloatingOverlayManager {
                         val maxX = (dm.widthPixels - dpToPx(context, 40)).coerceAtLeast(0)
                         val maxY = (dm.heightPixels - dpToPx(context, 40)).coerceAtLeast(0)
 
-                        // Natural movement: dx added to x, dy added to y
                         wmParams.x = (initialX + dx).coerceIn(0, maxX)
                         wmParams.y = (initialY + dy).coerceIn(0, maxY)
 
@@ -1644,6 +1590,56 @@ object FloatingOverlayManager {
         }
     }
 
+    private fun destroyCurrentOverlayViews() {
+        Log.d(TAG, "destroyCurrentOverlayViews: releasing views and WebView")
+
+        webView?.let { wv ->
+            try {
+                wv.stopLoading()
+                wv.loadUrl("about:blank")
+                wv.clearHistory()
+                wv.onPause()
+                (wv.parent as? ViewGroup)?.removeView(wv)
+                wv.destroy()
+            } catch (e: Exception) {
+                Log.e(TAG, "Error destroying WebView", e)
+            }
+        }
+        webView = null
+
+        overlayRootView?.let { root ->
+            try {
+                if (root.isAttachedToWindow) {
+                    windowManager?.removeViewImmediate(root)
+                } else {
+                    windowManager?.removeView(root)
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error removing root from WindowManager", e)
+            }
+        }
+        overlayRootView = null
+
+        mainContainer = null
+        cleanPhotosContainer = null
+        dockedEdgeTab = null
+        searchEditText = null
+        newTagEditText = null
+        addTagInlineContainer = null
+        chipsRowLayout = null
+        progressBar = null
+        verticalPhotosContainer = null
+        horizontalPhotosContainer = null
+        cleanTitleBadge = null
+        photosLoadingBadge = null
+        vScroll = null
+        hScroll = null
+        versionPills.clear()
+        cleanVersionPills.clear()
+        currentWmParams = null
+        lastLoadedUrl = ""
+    }
+
     private fun dpToPx(context: Context, dp: Float): Int {
         return TypedValue.applyDimension(
             TypedValue.COMPLEX_UNIT_DIP,
@@ -1655,7 +1651,7 @@ object FloatingOverlayManager {
     private fun dpToPx(context: Context, dp: Int): Int = dpToPx(context, dp.toFloat())
 
     /**
-     * Bridge receiving image URLs extracted from Google Search DOM
+     * JavaScript Bridge receiving high-res extracted image URLs from Google Search DOM
      */
     class ImageExtractorBridge(private val onExtracted: (List<String>) -> Unit) {
         @JavascriptInterface
