@@ -32,6 +32,22 @@ object CreatorDetectionBus {
     private val _activeSearchKeyword = MutableStateFlow("fotos")
     val activeSearchKeyword: StateFlow<String> = _activeSearchKeyword.asStateFlow()
 
+    private val _activeInterfaceVersion = MutableStateFlow(com.example.data.model.InterfaceVersion.BOTTOM_HORIZONTAL_CARDS)
+    val activeInterfaceVersion: StateFlow<com.example.data.model.InterfaceVersion> = _activeInterfaceVersion.asStateFlow()
+
+    private val _availableKeywords = MutableStateFlow(listOf("fotos", "beach", "look", "routine", "instagram"))
+    val availableKeywords: StateFlow<List<String>> = _availableKeywords.asStateFlow()
+
+    fun resetForTesting() {
+        _latestDetectedNickname.value = null
+        _latestPackageName.value = null
+        _isAccessibilityConnected.value = false
+        _isOverlayShowing.value = false
+        _activeSearchKeyword.value = "fotos"
+        _activeInterfaceVersion.value = com.example.data.model.InterfaceVersion.BOTTOM_HORIZONTAL_CARDS
+        _availableKeywords.value = listOf("fotos", "beach", "look", "routine", "instagram")
+    }
+
     fun setAccessibilityConnected(connected: Boolean) {
         _isAccessibilityConnected.value = connected
     }
@@ -44,6 +60,21 @@ object CreatorDetectionBus {
         _activeSearchKeyword.value = keyword
     }
 
+    fun addKeyword(keyword: String) {
+        val clean = keyword.trim().lowercase()
+        if (clean.isNotBlank() && !_availableKeywords.value.contains(clean)) {
+            _availableKeywords.value = _availableKeywords.value + clean
+        }
+        _activeSearchKeyword.value = clean
+    }
+
+    fun setInterfaceVersion(version: com.example.data.model.InterfaceVersion) {
+        _activeInterfaceVersion.value = version
+        if (FloatingOverlayManager.isShowing()) {
+            FloatingOverlayManager.switchInterfaceVersion(version)
+        }
+    }
+
     fun dispatchDetectedCreator(nickname: String, packageName: String, context: Context? = null) {
         val cleanNick = nickname.trim().removePrefix("@")
         if (cleanNick.isBlank()) return
@@ -51,15 +82,13 @@ object CreatorDetectionBus {
         _latestDetectedNickname.value = cleanNick
         _latestPackageName.value = packageName
 
-        context?.let { ctx ->
-            if (FloatingOverlayManager.isShowing()) {
-                val query = if (_activeSearchKeyword.value.isNotBlank()) {
-                    "$cleanNick ${_activeSearchKeyword.value}"
-                } else {
-                    cleanNick
-                }
-                FloatingOverlayManager.updateQuery(query)
+        if (FloatingOverlayManager.isShowing()) {
+            val query = if (_activeSearchKeyword.value.isNotBlank()) {
+                "$cleanNick ${_activeSearchKeyword.value}"
+            } else {
+                cleanNick
             }
+            FloatingOverlayManager.updateQuery(query)
         }
     }
 

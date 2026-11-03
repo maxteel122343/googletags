@@ -7,9 +7,15 @@ import com.example.ui.viewmodel.FeedViewModel
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
+import org.junit.Before
 import org.junit.Test
 
 class FeedViewModelTest {
+
+    @Before
+    fun setUp() {
+        com.example.data.service.CreatorDetectionBus.resetForTesting()
+    }
 
     @Test
     fun testInitialFeedState() {

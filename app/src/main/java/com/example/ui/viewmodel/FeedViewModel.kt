@@ -98,6 +98,29 @@ class FeedViewModel : ViewModel() {
                 _uiState.update { it.copy(isRealOverlayShowing = showing) }
             }
         }
+
+        // Listen for version switches triggered directly from inside the overlay
+        viewModelScope.launch {
+            CreatorDetectionBus.activeInterfaceVersion.collect { ver ->
+                if (ver != _uiState.value.activeInterfaceVersion) {
+                    _uiState.update { it.copy(activeInterfaceVersion = ver) }
+                }
+            }
+        }
+
+        // Listen for new keywords added from the overlay '+' button
+        viewModelScope.launch {
+            CreatorDetectionBus.availableKeywords.collect { keywords ->
+                val currentKeywords = _uiState.value.searchTemplates.map { it.keyword }
+                val newOnes = keywords.filter { it !in currentKeywords }
+                if (newOnes.isNotEmpty()) {
+                    val newTemplates = newOnes.map {
+                        SearchTemplate("custom_${System.currentTimeMillis()}_$it", it, it)
+                    }
+                    _uiState.update { it.copy(searchTemplates = it.searchTemplates + newTemplates) }
+                }
+            }
+        }
     }
 
     fun refreshSystemStatus(context: Context) {
@@ -117,6 +140,7 @@ class FeedViewModel : ViewModel() {
     }
 
     fun toggleRealOverlay(context: Context) {
+        CreatorDetectionBus.setInterfaceVersion(_uiState.value.activeInterfaceVersion)
         CreatorDetectionBus.setActiveKeyword(_uiState.value.activeTemplate?.keyword ?: "")
         CreatorDetectionBus.toggleRealOverlay(context, _uiState.value.detectedNickname)
         refreshSystemStatus(context)
@@ -185,6 +209,7 @@ class FeedViewModel : ViewModel() {
 
     fun setInterfaceVersion(version: InterfaceVersion) {
         _uiState.update { it.copy(activeInterfaceVersion = version, isFloatingCardVisible = true) }
+        CreatorDetectionBus.setInterfaceVersion(version)
     }
 
     fun setDefaultInterfaceVersion(version: InterfaceVersion) {
@@ -194,6 +219,7 @@ class FeedViewModel : ViewModel() {
                 activeInterfaceVersion = version
             )
         }
+        CreatorDetectionBus.setInterfaceVersion(version)
     }
 
     fun setSearchEngineType(type: SearchEngineType) {
@@ -233,6 +259,7 @@ class FeedViewModel : ViewModel() {
                 activeTemplateId = newTemplate.id
             )
         }
+        CreatorDetectionBus.addKeyword(newTemplate.keyword)
         CreatorDetectionBus.setActiveKeyword(newTemplate.keyword)
         triggerSearch(_uiState.value.detectedNickname, newTemplate.keyword)
     }

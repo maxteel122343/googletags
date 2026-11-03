@@ -47,9 +47,9 @@ class CreatorDetectorAccessibilityService : AccessibilityService() {
         val packageName = event.packageName?.toString() ?: return
         if (!isTargetPackage(packageName)) return
 
-        // Throttle events slightly to prevent excess processing on scroll
+        // Throttle events slightly (80ms) for fast and responsive scroll detection
         val now = System.currentTimeMillis()
-        if (now - lastEventTime < 200) return
+        if (now - lastEventTime < 80) return
         lastEventTime = now
 
         val root = rootInActiveWindow ?: event.source ?: return
@@ -64,7 +64,7 @@ class CreatorDetectorAccessibilityService : AccessibilityService() {
 
             if (!detected.isNullOrBlank()) {
                 val cleanNickname = detected.trim().removePrefix("@")
-                if (cleanNickname.isNotBlank() && cleanNickname != lastDetectedNickname) {
+                if (cleanNickname.isNotBlank()) {
                     lastDetectedNickname = cleanNickname
                     Log.d(TAG, "Creator detected: @$cleanNickname from $packageName")
 
